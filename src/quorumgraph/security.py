@@ -14,7 +14,7 @@ rather than a runtime check.
 import hashlib
 import secrets
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -79,7 +79,25 @@ def get_current_validator(
     return validator
 
 
+def _admin_token(request: Request) -> str | None:
+    return request.app.state.admin_token or config.ADMIN_TOKEN
+
+
+def _is_admin(request: Request, token: str) -> bool:
+    admin = _admin_token(request)
+    return bool(admin) and secrets.compare_digest(token.encode(), admin.encode())
+
+
+def require_admin(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str:
+    """Admin only. Validators deliberately can't promote validators: otherwise a
+    captured committee could appoint its own successors."""
+    if creds is None or not _is_admin(request, creds.credentials):
+        raise _unauthorized("admin credential required")
+    return "admin"
+
+
 def get_operator(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: Session = Depends(get_session),
 ) -> str:
@@ -90,8 +108,7 @@ def get_operator(
     if creds is None:
         raise _unauthorized("missing operator credential")
     token = creds.credentials
-    admin = config.ADMIN_TOKEN
-    if admin and secrets.compare_digest(token.encode(), admin.encode()):
+    if _is_admin(request, token):
         return "admin"
     validator = session.scalar(select(Validator).where(Validator.credential_hash == hash_token(token)))
     if validator is None or not validator.active:

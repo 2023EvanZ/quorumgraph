@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -41,6 +41,41 @@ def _recheck_not_revoked_under_lock(session: Session, agent: Agent, detail: str)
     if agent.status is AgentStatus.REVOKED:
         session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, detail)
+
+
+def cast_revocation_vote(session: Session, validator: Validator, agent: Agent, reason: str) -> trust.TrustDecision:
+    """Insert-then-count revocation vote (caller commits). Raises 409 if the agent
+    is already revoked or this validator already voted. Shared by the
+    revoke-vote endpoint and failed spot checks."""
+    if agent.status is AgentStatus.REVOKED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "agent is already revoked")
+    session.add(RevocationVote(validator_id=validator.id, agent_id=agent.id, reason=reason))
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "validator has already voted to revoke this agent")
+    _recheck_not_revoked_under_lock(session, agent, "agent is already revoked")
+    audit.record(session, audit.REVOCATION_VOTE, actor_id=validator.id, agent_id=agent.id, reason=reason)
+    return trust.refresh_status(session, agent, actor_id=validator.id)
+
+
+MAX_LINEAGE_DEPTH = 256
+
+
+def _is_lineage(session: Session, *, ancestor_id: str, agent: Agent) -> bool:
+    """True if `agent` is `ancestor_id` or descends from it. Lineage edges can't be
+    forged (children are registered by their parent's credential), so walking
+    parent_agent_id is trustworthy. Depth-capped; cycles are impossible because a
+    parent must exist before its child."""
+    node: Agent | None = agent
+    for _ in range(MAX_LINEAGE_DEPTH):
+        if node is None:
+            return False
+        if node.id == ancestor_id:
+            return True
+        node = session.get(Agent, node.parent_agent_id) if node.parent_agent_id else None
+    return True  # deeper than the cap: refuse rather than guess (fail closed)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=AgentCreated)
@@ -114,12 +149,20 @@ def get_agent(agent_id: str, session: Session = Depends(get_session)) -> AgentTr
 @router.post("/{agent_id}/endorse", status_code=status.HTTP_201_CREATED, response_model=EndorsementOut)
 def endorse_agent(
     agent_id: str,
+    request: Request,
     session: Session = Depends(get_session),
     validator: Validator = Depends(get_current_validator),
 ) -> EndorsementOut:
     agent = _get_agent_or_404(session, agent_id)
     if agent.status is AgentStatus.REVOKED:
         raise HTTPException(status.HTTP_409_CONFLICT, "cannot endorse a revoked agent")
+    if validator.agent_id is not None and request.app.state.lineage_guard and _is_lineage(
+        session, ancestor_id=validator.agent_id, agent=agent
+    ):
+        audit.record(session, audit.LINEAGE_ENDORSEMENT_BLOCKED, actor_id=validator.id, agent_id=agent.id,
+                     validator_agent_id=validator.agent_id)
+        session.commit()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "validators may not endorse themselves or their descendants")
 
     session.add(Endorsement(validator_id=validator.id, agent_id=agent.id))
     try:
@@ -153,19 +196,7 @@ def vote_to_revoke(
     is revoked permanently. Pending agents can be revoked too (pre-emptive block).
     Same insert-then-count pattern as endorse_agent."""
     agent = _get_agent_or_404(session, agent_id)
-    if agent.status is AgentStatus.REVOKED:
-        raise HTTPException(status.HTTP_409_CONFLICT, "agent is already revoked")
-
-    session.add(RevocationVote(validator_id=validator.id, agent_id=agent.id, reason=body.reason))
-    try:
-        session.flush()
-    except IntegrityError:
-        session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "validator has already voted to revoke this agent")
-    _recheck_not_revoked_under_lock(session, agent, "agent is already revoked")
-
-    audit.record(session, audit.REVOCATION_VOTE, actor_id=validator.id, agent_id=agent.id, reason=body.reason)
-    decision = trust.refresh_status(session, agent, actor_id=validator.id)
+    decision = cast_revocation_vote(session, validator, agent, body.reason)
     session.commit()
 
     return RevocationVoteOut(

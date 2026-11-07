@@ -18,6 +18,11 @@ REVOCATION_QUORUM = int(os.getenv("QG_REVOCATION_QUORUM", "2"))
 # Unset = disabled; active validators can still read those endpoints.
 ADMIN_TOKEN = os.getenv("QG_ADMIN_TOKEN") or None
 
+# Lineage guard: a validator that is itself an agent (promoted via POST /validators)
+# may not endorse its own descendants. On by default; "0" disables it, which exists
+# only so the recursive-oversight experiment can measure what the guard prevents.
+LINEAGE_GUARD = os.getenv("QG_LINEAGE_GUARD", "1") != "0"
+
 # --- Phase 5: distributed gateways ---------------------------------------------
 
 # Shared secret gateways present to the trust service's /internal endpoints.

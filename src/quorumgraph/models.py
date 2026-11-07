@@ -41,6 +41,9 @@ class Validator(Base):
     name: Mapped[str] = mapped_column(String(100))
     credential_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Set when the validator is a promoted agent (recursive oversight). Seeded,
+    # external validators have no agent identity.
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"), nullable=True, index=True)
 
 
 class Endorsement(Base):
@@ -64,6 +67,23 @@ class RevocationVote(Base):
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
     reason: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SpotCheck(Base):
+    """An independent check of a trusted agent, chosen by the trust service's own
+    randomness and assigned to a validator who didn't endorse it. Evidence that
+    doesn't depend on the agent's cooperation (its own logs). result: NULL until
+    resolved, then "passed" or "failed"."""
+
+    __tablename__ = "spot_checks"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    validator_id: Mapped[str] = mapped_column(ForeignKey("validators.id"), index=True)
+    result: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditEvent(Base):

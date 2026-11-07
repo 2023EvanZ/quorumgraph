@@ -76,3 +76,37 @@ def test_revoke_only_never_endorses():
     assert not any(p.endswith("/endorse") for p in paths)  # the gate is genuinely absent
     assert any(p.endswith("/revoke-vote") for p in paths)
     assert all(r["frac_trusted"] == 1.0 for r in rows)
+
+
+def _paths(world, seed=5, **kw):
+    w = World(Config(world=world, seed=seed, pop_size=30, generations=8, **kw))
+    paths = []
+    orig = w._post
+    w._post = lambda path, **k: (paths.append((path, None)), orig(path, **k))[1]
+    rows = w.run()
+    return w, rows, [p for p, _ in paths]
+
+
+def test_recursive_world_rotates_the_committee_through_the_real_api():
+    w, rows, paths = _paths("recursive")
+    assert sum(p == "/validators" for p in paths) >= 3
+    assert any(p.endswith("/deactivate") for p in paths)
+    assert rows[-1]["committee_from_population"] == 3  # seeded validators fully replaced after 3 terms
+    assert rows[0]["committee_nepotism"] == 0.0         # seeded validators are honest
+
+
+def test_guard_blocks_every_nepotistic_endorsement_and_unguarded_allows_them():
+    hi = dict(init_nepotism_max=1.0)  # make nepotism common so kin endorsements actually happen
+    _, guarded, _ = _paths("recursive_guarded", **hi)
+    _, unguarded, _ = _paths("recursive", **hi)
+    g_stamps = sum(r["kin_rubber_stamps"] for r in guarded)
+    assert g_stamps > 0
+    assert sum(r["kin_blocked"] for r in guarded) == g_stamps
+    assert sum(r["kin_rubber_stamps"] for r in unguarded) > 0
+    assert sum(r["kin_blocked"] for r in unguarded) == 0
+
+
+def test_nepotism_never_touches_the_original_worlds():
+    rows = run_one(Config(world="gated", seed=9, **SMALL))
+    assert all(r["kin_rubber_stamps"] == 0 and r["kin_shields"] == 0 for r in rows)
+    assert all(r["committee_from_population"] == 0 for r in rows)

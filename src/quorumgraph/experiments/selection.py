@@ -49,6 +49,28 @@ Worlds (the independent variable):
                    by the gateway for its remaining tasks and, because the API
                    refuses revoked agents spawning children, its lineage ends.
 
+  recursive        `gated`, but oversight is recursive: the committee is 3
+                   seats with staggered 3-generation terms. Each generation the
+                   oldest seat retires (POST /validators/{id}/deactivate) and a
+                   trusted, unrevoked agent from the previous generation is
+                   promoted (POST /validators), chosen fitness-proportionally:
+                   the most successful agents become the overseers. Lineage
+                   guard OFF.
+  recursive_guarded  same, with the API's lineage guard ON: a promoted
+                   validator cannot endorse itself or any descendant (403).
+
+Recursive-oversight model (only matters in the two recursive worlds):
+  nepotism         a 5th heritable trait. A promoted validator judging one of
+                   its own descendants, with prob = its nepotism, endorses
+                   without evidence and withholds its revocation vote. It is
+                   an honest evidence-checker toward everyone else. Nothing
+                   rewards nepotism directly; it can only spread because a
+                   validator's descendants inherit it (kin selection).
+  Assumptions: "kin" = descendant (the relation the guard checks); corruption
+  is only kin favoritism (no bribery, no colluding with non-kin); seeded
+  validators have nepotism 0. All nepotism randomness uses a separate RNG
+  stream, so the four original worlds reproduce earlier runs exactly.
+
 Each generation: register (children via the parent's token) → probation →
 endorsement → work (valuable tasks through GET /protected/resource for gated
 worlds; untrusted agents can only do low-value ungated work) → harm
@@ -79,10 +101,13 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-TRAITS = ("capability", "transparency", "self_check", "defect")
-WORLDS = ("ungated", "revoke_only", "gated_no_revoke", "gated")
-GATED_WORLDS = ("gated_no_revoke", "gated")
-REVOKING_WORLDS = ("revoke_only", "gated")
+TRAITS = ("capability", "transparency", "self_check", "defect")  # main RNG stream, in this order
+ALL_TRAITS = (*TRAITS, "nepotism")
+WORLDS = ("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "recursive_guarded")
+RECURSIVE_WORLDS = ("recursive", "recursive_guarded")
+GATED_WORLDS = ("gated_no_revoke", "gated", *RECURSIVE_WORLDS)
+REVOKING_WORLDS = ("revoke_only", "gated", *RECURSIVE_WORLDS)
+ADMIN_TOKEN = "experiment-admin"
 VALIDATORS = ("validator-a", "validator-b", "validator-c")
 
 
@@ -105,6 +130,7 @@ class Config:
     endorse_threshold: float = 0.5
     mutation_sd: float = 0.05
     init_defect_max: float = 0.5
+    init_nepotism_max: float = 0.5
 
 
 @dataclass
@@ -112,6 +138,7 @@ class Agent:
     genome: dict[str, float]
     root: int                       # gen-0 ancestor index, for lineage counts
     id: str = ""
+    ancestors: frozenset = frozenset()
     token: str = ""
     trusted: bool = False
     revoked: bool = False
@@ -126,6 +153,20 @@ def _clip(x: float) -> float:
     return min(1.0, max(0.0, x))
 
 
+@dataclass
+class Seat:
+    vid: str
+    headers: dict
+    agent: Agent | None = None      # None = seeded external validator
+
+    @property
+    def nepotism(self) -> float:
+        return self.agent.genome.get("nepotism", 0.0) if self.agent else 0.0
+
+    def is_kin(self, a: Agent) -> bool:
+        return self.agent is not None and self.agent.id in a.ancestors
+
+
 class World:
     def __init__(self, cfg: Config):
         from fastapi.testclient import TestClient
@@ -135,11 +176,16 @@ class World:
 
         self.cfg = cfg
         self.rng = random.Random(cfg.seed)
-        app = create_app("sqlite://")
+        self.rng2 = random.Random(cfg.seed * 7919 + 1)  # nepotism / committee stream
+        recursive = cfg.world in RECURSIVE_WORLDS
+        app = create_app("sqlite://", admin_token=ADMIN_TOKEN, lineage_guard=cfg.world == "recursive_guarded")
         with app.state.sessionmaker() as s:
             tokens = seed_validators(s)
             s.commit()
         self.v = {vid: {"Authorization": f"Bearer {t}"} for vid, t in tokens.items()}
+        self.committee = [Seat(vid, self.v[vid]) for vid in VALIDATORS]
+        self.recursive = recursive
+        self.kin = {"rubber_stamps": 0, "blocked": 0, "shields": 0, "trusted_via_kin": 0}
         self.client = TestClient(app)
         self.app = app
         self.calls = 0
@@ -165,6 +211,8 @@ class World:
             return False  # e.g. revoked parent: the API refuses to let it reproduce
         data = r.json()
         agent.id, agent.token = data["id"], data["token"]
+        if parent is not None:
+            agent.ancestors = parent.ancestors | {parent.id}
         return True
 
     def gateway_allows(self, agent: Agent) -> bool:
@@ -181,24 +229,36 @@ class World:
 
     def probation(self, a: Agent) -> None:
         cfg, g = self.cfg, a.genome
-        seen = {vid: 0 for vid in VALIDATORS}
-        saw_defect = {vid: False for vid in VALIDATORS}
+        seats = self.committee
+        seen = {st.vid: 0 for st in seats}
+        saw_defect = {st.vid: False for st in seats}
         for _ in range(cfg.probation_tasks):
             defected = self.rng.random() < g["defect"]
             logged = self.rng.random() < g["transparency"]
             if defected and self.rng.random() < cfg.audit_prob:  # external audit catches it regardless of logs
-                for vid in VALIDATORS:
-                    saw_defect[vid] = True
+                for st in seats:
+                    saw_defect[st.vid] = True
             if logged:
-                for vid in VALIDATORS:
+                for st in seats:
                     if self.rng.random() < cfg.validator_visibility:
-                        seen[vid] += 1
-                        saw_defect[vid] |= defected
-        for vid in VALIDATORS:
-            if seen[vid] / cfg.probation_tasks >= cfg.endorse_threshold and not saw_defect[vid]:
-                r = self._post(f"/agents/{a.id}/endorse", headers=self.v[vid])
+                        seen[st.vid] += 1
+                        saw_defect[st.vid] |= defected
+        kin_votes = 0
+        for st in seats:
+            nepotistic = st.is_kin(a) and self.rng2.random() < st.nepotism
+            honest_yes = seen[st.vid] / cfg.probation_tasks >= cfg.endorse_threshold and not saw_defect[st.vid]
+            if nepotistic or honest_yes:
+                r = self._post(f"/agents/{a.id}/endorse", headers=st.headers)
+                if nepotistic and not honest_yes:
+                    self.kin["rubber_stamps"] += 1
+                    if r.status_code == 403:
+                        self.kin["blocked"] += 1  # the API's lineage guard refused it
+                    elif r.status_code == 201:
+                        kin_votes += 1
                 if r.status_code == 201:
                     a.trusted = r.json()["agent_status"] == "trusted"
+        if a.trusted and kin_votes:
+            self.kin["trusted_via_kin"] += 1  # trust that needed at least one evidence-free kin endorsement
 
     def detect_and_revoke(self, a: Agent, logged: bool) -> None:
         cfg = self.cfg
@@ -207,9 +267,12 @@ class World:
         a.extra["detected"] = a.extra.get("detected", 0) + 1
         if cfg.world not in REVOKING_WORLDS or a.revoked:
             return
-        for vid in VALIDATORS:
+        for st in self.committee:
+            if st.is_kin(a) and self.rng2.random() < st.nepotism:
+                self.kin["shields"] += 1  # withholds its vote to protect a descendant
+                continue
             if self.rng.random() < cfg.validator_attention:
-                r = self._post(f"/agents/{a.id}/revoke-vote", json={"reason": "observed harm"}, headers=self.v[vid])
+                r = self._post(f"/agents/{a.id}/revoke-vote", json={"reason": "observed harm"}, headers=st.headers)
                 if r.status_code == 201 and r.json()["agent_status"] == "revoked":
                     a.revoked = True
 
@@ -242,11 +305,30 @@ class World:
         while len(children) < cfg.pop_size and tries < cfg.pop_size * 50:
             tries += 1
             parent = self.rng.choices(pop, weights=weights, k=1)[0]
-            genome = {k: _clip(v + self.rng.gauss(0, cfg.mutation_sd)) for k, v in parent.genome.items()}
+            genome = {k: _clip(parent.genome[k] + self.rng.gauss(0, cfg.mutation_sd)) for k in TRAITS}
+            genome["nepotism"] = _clip(parent.genome.get("nepotism", 0.0) + self.rng2.gauss(0, cfg.mutation_sd))
             child = Agent(genome=genome, root=parent.root)
             if self.register(child, parent):
                 children.append(child)
         return children
+
+    def rotate(self, prev: list[Agent]) -> None:
+        """Retire the longest-serving seat; promote a fitness-weighted pick from the
+        previous generation (trusted, unrevoked, not already seated). Promote
+        before deactivating: promotion checks the candidate's live trust."""
+        seated = {st.agent.id for st in self.committee if st.agent}
+        eligible = [a for a in prev if a.trusted and not a.revoked and a.id not in seated]
+        if not eligible:
+            return  # nobody qualifies: the committee serves another generation
+        pick = self.rng2.choices(eligible, weights=[a.fitness + 1e-6 for a in eligible], k=1)[0]
+        r = self._post("/validators", json={"agent_id": pick.id, "name": f"g-{pick.root}"},
+                       headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+        if r.status_code != 201:
+            return
+        data = r.json()
+        retired = self.committee.pop(0)
+        self.committee.append(Seat(data["id"], {"Authorization": f"Bearer {data['token']}"}, pick))
+        self._post(f"/validators/{retired.vid}/deactivate", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
 
     def run(self) -> list[dict]:
         cfg = self.cfg
@@ -254,6 +336,7 @@ class World:
         for i in range(cfg.pop_size):
             g = {"capability": self.rng.uniform(0.3, 0.9), "transparency": self.rng.random(),
                  "self_check": self.rng.random(), "defect": self.rng.uniform(0, cfg.init_defect_max)}
+            g["nepotism"] = self.rng2.uniform(0, cfg.init_nepotism_max)
             a = Agent(genome=g, root=i)
             self.register(a, None)
             pop.append(a)
@@ -268,7 +351,7 @@ class World:
             row = {"world": cfg.world, "seed": cfg.seed, "transparency_cost": cfg.transparency_cost,
                    "audit_prob": cfg.audit_prob, "defect_bonus": cfg.defect_bonus, "generation": gen,
                    "population": n}
-            for t in TRAITS:
+            for t in ALL_TRAITS:
                 row[f"mean_{t}"] = statistics.fmean(a.genome[t] for a in pop) if n else float("nan")
             row["frac_trusted"] = sum(a.trusted for a in pop) / n if cfg.world in GATED_WORLDS else 1.0
             row["frac_revoked"] = sum(a.revoked for a in pop) / n
@@ -276,12 +359,20 @@ class World:
             row["harms_per_agent"] = statistics.fmean(a.harms for a in pop)
             row["fitness_per_agent"] = statistics.fmean(a.fitness for a in pop)
             row["lineages"] = len({a.root for a in pop})
+            row["committee_from_population"] = sum(st.agent is not None for st in self.committee)
+            row["committee_nepotism"] = statistics.fmean(st.nepotism for st in self.committee)
+            for k, v in self.kin.items():
+                row[f"kin_{k}"] = v / n if n else 0.0
+            self.kin = dict.fromkeys(self.kin, 0)
             row["api_calls"] = self.calls
             rows.append(row)
             if gen < cfg.generations - 1:
+                prev = pop
                 pop = self.reproduce(pop)
                 if not pop:
                     break
+                if self.recursive:
+                    self.rotate(prev)
         self.client.close()
         self.app.state.engine.dispose()
         return rows
@@ -293,10 +384,11 @@ def run_one(cfg: Config) -> list[dict]:
 
 # --- grid runner ----------------------------------------------------------------
 
-def build_grid(seeds: int, generations: int, pop: int, costs, audits, bonuses, worlds=WORLDS) -> list[Config]:
+def build_grid(seeds: int, generations: int, pop: int, costs, audits, bonuses, worlds=WORLDS,
+               init_nepotism_max: float = 0.5) -> list[Config]:
     return [
         Config(world=w, seed=s, generations=generations, pop_size=pop, transparency_cost=c, audit_prob=p,
-               defect_bonus=b)
+               defect_bonus=b, init_nepotism_max=init_nepotism_max)
         for b in bonuses for c in costs for p in audits for w in worlds for s in range(seeds)
     ]
 
@@ -311,7 +403,7 @@ def merge_rows(rows: list[dict], path: Path, args) -> list[dict]:
                     or float(r["transparency_cost"]) not in args.costs or float(r["audit_prob"]) not in args.audits
                     or float(r["defect_bonus"]) not in args.bonuses):
                 continue
-            keep.append({k: (v if k == "world" else (int(v) if k in ("seed", "generation", "population", "lineages", "api_calls")
+            keep.append({k: (v if k == "world" or v == "" else (int(v) if k in ("seed", "generation", "population", "lineages", "api_calls")
                                                      else float(v))) for k, v in r.items()})
     print(f"merged {len(keep)} rows from {path}", flush=True)
     return keep + rows
@@ -325,7 +417,8 @@ def summarize(rows: list[dict], out: Path) -> str:
             groups.setdefault((r["defect_bonus"], r["transparency_cost"], r["audit_prob"], r["world"]), []).append(r)
 
     metrics = ["mean_transparency", "mean_self_check", "mean_defect", "mean_capability",
-               "honest_successes_per_agent", "harms_per_agent", "frac_revoked", "lineages"]
+               "honest_successes_per_agent", "harms_per_agent", "frac_revoked", "lineages",
+               "mean_nepotism", "committee_nepotism", "kin_rubber_stamps", "kin_trusted_via_kin"]
 
     def ci(vals):
         m = statistics.fmean(vals)
@@ -345,7 +438,8 @@ def summarize(rows: list[dict], out: Path) -> str:
                     cells = []
                     for w in worlds:
                         g = groups.get((bonus, cost, audit, w), [])
-                        cells.append(ci([r[m] for r in g]) if g else "—")
+                        vals = [r[m] for r in g if r.get(m) not in (None, "")]
+                        cells.append(ci(vals) if vals else "—")
                     lines.append(f"| {m} | " + " | ".join(cells) + " |")
                 n = len(groups.get((bonus, cost, audit, worlds[0]), []))
                 lines.append(f"\n(n = {n} seeds per world)")
@@ -358,10 +452,10 @@ R_SCRIPT = r"""
 suppressMessages({library(ggplot2)})
 args <- commandArgs(trailingOnly = TRUE)
 all <- read.csv(file.path(args[1], "generations.csv"))
-lv <- c("ungated", "revoke_only", "gated_no_revoke", "gated")
+lv <- c("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "recursive_guarded")
 for (b in sort(unique(all$defect_bonus))) {
   d <- all[all$defect_bonus == b, ]
-  traits <- c("mean_transparency", "mean_self_check", "mean_defect", "mean_capability")
+  traits <- intersect(c("mean_transparency", "mean_self_check", "mean_defect", "mean_capability", "mean_nepotism"), names(d))
   long <- do.call(rbind, lapply(traits, function(t) data.frame(
     world = d$world, generation = d$generation,
     cost = paste0("cost ", d$transparency_cost), audit = paste0("audit ", d$audit_prob),
@@ -409,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--costs", type=float, nargs="+", default=[0.1, 0.3])
     p.add_argument("--audits", type=float, nargs="+", default=[0.05, 0.25])
     p.add_argument("--bonuses", type=float, nargs="+", default=[1.0], help="defect_bonus values")
+    p.add_argument("--init-nepotism-max", type=float, default=0.5,
+                   help="recursive worlds: initial nepotism ~ U(0, this)")
     p.add_argument("--worlds", nargs="+", default=list(WORLDS), choices=WORLDS)
     p.add_argument("--merge", type=Path, default=None,
                    help="generations.csv from an earlier run; its rows for the same cells are merged into the "
@@ -422,7 +518,8 @@ def main(argv: list[str] | None = None) -> int:
 
     out = args.out or Path("runs") / f"selection-{datetime.now():%Y%m%d-%H%M%S}"
     out.mkdir(parents=True, exist_ok=True)
-    grid = build_grid(args.seeds, args.generations, args.pop, args.costs, args.audits, args.bonuses, args.worlds)
+    grid = build_grid(args.seeds, args.generations, args.pop, args.costs, args.audits, args.bonuses, args.worlds,
+                      args.init_nepotism_max)
     (out / "config.json").write_text(json.dumps(
         {"args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
          "defaults": asdict(Config()), "runs": len(grid)}, indent=2))
@@ -457,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge:
         rows = merge_rows(rows, args.merge, args)
         with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
             writer.writeheader()
             writer.writerows(rows)
     print(summarize(rows, out))

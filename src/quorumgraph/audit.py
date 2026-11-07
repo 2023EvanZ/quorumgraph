@@ -11,6 +11,12 @@ AGENT_STATUS_CHANGED = "agent_status_changed"
 REVOCATION_VOTE = "revocation_vote"
 ACCESS_ALLOWED = "access_allowed"
 ACCESS_DENIED = "access_denied"
+VALIDATOR_PROMOTED = "validator_promoted"
+VALIDATOR_DEACTIVATED = "validator_deactivated"
+LINEAGE_ENDORSEMENT_BLOCKED = "lineage_endorsement_blocked"
+SPOT_CHECK_ASSIGNED = "spot_check_assigned"
+SPOT_CHECK_PASSED = "spot_check_passed"
+SPOT_CHECK_FAILED = "spot_check_failed"
 
 
 def record(

@@ -216,6 +216,33 @@ Outputs in `runs/soak-*/`: `report.md`, `report.json`, `violations.jsonl`, `prog
 
 Run overnight with `caffeinate -i` in front so the Mac doesn't sleep (lid open, on power).
 
+## Recursive oversight and spot checks
+
+Two additions motivated by the selection results.
+
+**Promoted validators + lineage guard.** `POST /validators` (admin only) turns a currently
+trusted agent into a validator with its own credential. Validators can't appoint validators,
+so a captured committee can't choose its successors. A promoted validator **cannot endorse
+itself or any descendant** (403, recorded as `lineage_endorsement_blocked`). Lineage edges
+can't be forged (children are registered with the parent's credential), so walking
+`parent_agent_id` is trustworthy. Set `QG_LINEAGE_GUARD=0` to disable; that exists only so the
+experiment can measure what the guard prevents.
+
+**Spot checks.** The selection experiment showed that revocation driven only by an agent's
+own logs selects for opacity. Spot checks are evidence that doesn't need the agent's
+cooperation:
+- the *trust service* draws the sample (`secrets.SystemRandom`; injectable for experiments),
+  so neither agents nor validators choose who is checked;
+- the auditor is an active validator that did **not** endorse the agent and isn't in its
+  lineage (two independent records, double-entry style); with none available the check is
+  skipped and that is logged;
+- a failure is exactly **one** revocation vote. Quorum still decides, so a single corrupt
+  auditor can't revoke anyone; the cost is that an honest failure needs a second validator.
+
+The selection experiment still models audits as `audit_prob` rather than calling
+`/spot-checks`. The behaviour is the same, and switching would change the RNG stream and
+require rerunning every world.
+
 ## Endpoints
 
 | Endpoint | Auth | Purpose |
@@ -231,6 +258,11 @@ Run overnight with `caffeinate -i` in front so the Mac doesn't sleep (lid open, 
 | `GET /dashboard` | none (page); data calls need operator token | Operator UI |
 | `POST /internal/authorize` | gateway key | Decision for a token hash + `as_of_event_id` cursor |
 | `GET /internal/events?after=N` | gateway key | SSE: replay status changes > N, `ready`, then tail |
+| `POST /validators` | admin | Promote a trusted agent to validator (recursive oversight); token shown once |
+| `POST /validators/{id}/deactivate` | admin | Retire a validator; its endorsements/votes stop counting |
+| `POST /spot-checks/sample` | admin | Service-chosen random sample of trusted agents, each assigned an independent validator |
+| `POST /spot-checks/{id}/result` | assigned validator | `passed` / `failed`; a failure is that validator's revocation vote |
+| `GET /spot-checks` | validator or admin | List checks; filter `agent_id`, `open_only` |
 
 ## Layout
 
