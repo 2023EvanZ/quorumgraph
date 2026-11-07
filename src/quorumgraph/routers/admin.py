@@ -1,6 +1,6 @@
 """Read-only operator endpoints: audit log and trust graph."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -14,9 +14,12 @@ router = APIRouter(tags=["operator"], dependencies=[Depends(get_operator)])
 
 
 @router.get("/operator/me")
-def whoami(operator_id: str = Depends(get_operator)) -> dict:
-    """Used by the dashboard's sign-in to check a token and learn what it can do."""
-    return {"operator_id": operator_id, "kind": "admin" if operator_id == "admin" else "validator"}
+def whoami(request: Request, operator_id: str = Depends(get_operator)) -> dict:
+    """Used by the dashboard's sign-in to check a token and learn what it can do,
+    plus the oversight policy in force (so the UI can explain decisions)."""
+    return {"operator_id": operator_id, "kind": "admin" if operator_id == "admin" else "validator",
+            "lineage_guard": request.app.state.lineage_guard,
+            "spot_check_escalation": request.app.state.spot_check_escalation}
 
 
 @router.get("/audit", response_model=list[AuditEventOut])
@@ -48,7 +51,8 @@ def get_graph(session: Session = Depends(get_session)) -> GraphOut:
     agents = list(session.scalars(select(Agent).order_by(Agent.created_at)))
     active = {v.id: v.active for v in validators}
 
-    nodes = [GraphNode(id=v.id, type="validator", label=v.name, active=v.active) for v in validators]
+    nodes = [GraphNode(id=v.id, type="validator", label=v.name, active=v.active, agent_id=v.agent_id)
+             for v in validators]
     nodes += [
         GraphNode(id=a.id, type="agent", label=a.name, status=trust.evaluate(session, a).status) for a in agents
     ]

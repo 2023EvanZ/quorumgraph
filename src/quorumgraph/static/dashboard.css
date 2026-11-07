@@ -222,3 +222,16 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .audit .ev.access_denied, .audit .ev.registration_denied, .audit .ev.revocation_vote { color: var(--revoked); }
 .audit .ev.access_allowed, .audit .ev.agent_endorsed { color: var(--trusted); }
 .audit .detail { grid-column: 2; color: var(--muted); overflow-wrap: anywhere; }
+
+/* recursive oversight + spot checks */
+.edge.promotion { stroke: var(--accent); stroke-dasharray: 2 4; fill: none; stroke-width: 1.4; }
+.ln-promotion { border-top: 2px dotted var(--accent); }
+.node.validator.promoted rect { stroke: var(--accent); stroke-dasharray: 4 2; }
+.token-once { display: block; margin-top: 4px; padding: 4px 6px; word-break: break-all; user-select: all; background: var(--bg); border-radius: 4px; }
+.spot { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.spot li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.spot .row { display: inline-flex; gap: 6px; }
+#sample-form input[type=number] { width: 5.5em; }
+.audit .ev.validator_promoted, .audit .ev.spot_check_passed { color: var(--trusted); }
+.audit .ev.lineage_endorsement_blocked, .audit .ev.spot_check_failed, .audit .ev.validator_deactivated { color: var(--revoked); }
+.audit .ev.spot_check_assigned, .audit .ev.spot_check_escalated { color: var(--accent); }

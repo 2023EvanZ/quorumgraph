@@ -18,10 +18,35 @@ REVOCATION_QUORUM = int(os.getenv("QG_REVOCATION_QUORUM", "2"))
 # Unset = disabled; active validators can still read those endpoints.
 ADMIN_TOKEN = os.getenv("QG_ADMIN_TOKEN") or None
 
-# Lineage guard: a validator that is itself an agent (promoted via POST /validators)
-# may not endorse its own descendants. On by default; "0" disables it, which exists
-# only so the recursive-oversight experiment can measure what the guard prevents.
-LINEAGE_GUARD = os.getenv("QG_LINEAGE_GUARD", "1") != "0"
+# Lineage guard for validators that are themselves agents (promoted via POST /validators):
+#   "block" (default, also "1"): a promoted validator may not endorse itself or a descendant.
+#   "soft":  kin endorsements are accepted and count toward quorum, but trust also
+#            requires at least one active endorser outside the agent's lineage.
+#   "off"   (also "0"): no lineage rule; exists so experiments can measure the guard.
+LINEAGE_GUARD_MODES = ("off", "block", "soft")
+
+
+def parse_lineage_guard(value) -> str:
+    """Normalize env/arg values (bools, "0"/"1", mode names) to a mode name."""
+    if value is True or value in ("1", "on", "true"):
+        return "block"
+    if value is False or value in ("0", "false", ""):
+        return "off"
+    if value in LINEAGE_GUARD_MODES:
+        return value
+    raise ValueError(f"lineage guard must be one of {LINEAGE_GUARD_MODES}, got {value!r}")
+
+
+LINEAGE_GUARD = parse_lineage_guard(os.getenv("QG_LINEAGE_GUARD", "block").lower())
+
+# A failed spot check is one revocation vote. With escalation on (default), the
+# service also assigns a confirmation check to a second validator (not the first
+# auditor, not the agent's kin; endorsers allowed, since confirming a failure goes
+# against their interest). Confirmations don't escalate further, so one auditor
+# still can't revoke alone. "0" = single vote only: measured to revoke only ~1–15%
+# of genuinely failing agents in the selection sim, because the second vote rarely
+# comes from anywhere else.
+SPOT_CHECK_ESCALATION = os.getenv("QG_SPOT_CHECK_ESCALATION", "1") != "0"
 
 # --- Phase 5: distributed gateways ---------------------------------------------
 

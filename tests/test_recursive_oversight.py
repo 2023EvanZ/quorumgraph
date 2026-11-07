@@ -115,3 +115,75 @@ def test_old_database_gets_agent_id_column(tmp_path):
     app.state.engine.dispose()
     cols = [r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(validators)")]
     assert "agent_id" in cols
+
+
+def _kin_chain(client, tokens):
+    """grandparent -> parent (both trusted and promoted) -> child (pending)."""
+    gp = _trusted(client, tokens, "gp")
+    p = _trusted(client, tokens, "p", parent=gp)
+    v_gp, v_p = _promote(client, gp), _promote(client, p)
+    child = register(client, "child", p["id"], p["token"])
+    return v_gp, v_p, child
+
+
+def test_soft_guard_accepts_kin_endorsements_but_kin_alone_cannot_trust():
+    _, client, tokens = _setup(lineage_guard="soft")
+    v_gp, v_p, child = _kin_chain(client, tokens)
+    assert endorse(client, child["id"], v_gp["token"]).status_code == 201  # accepted, not blocked
+    r = endorse(client, child["id"], v_p["token"])
+    assert r.status_code == 201
+    assert r.json()["endorsements"] == 2 and r.json()["agent_status"] == "pending"
+    assert access(client, child["token"]).status_code == 403  # the gateway applies the same rule
+    assert client.get(f"/agents/{child['id']}").json()["status"] == "pending"
+    r = endorse(client, child["id"], tokens["validator-c"])  # one independent endorser completes it
+    assert r.json()["agent_status"] == "trusted"
+    assert access(client, child["token"]).status_code == 200
+
+
+def test_soft_guard_one_kin_plus_one_independent_is_enough():
+    _, client, tokens = _setup(lineage_guard="soft")
+    v_gp, _, child = _kin_chain(client, tokens)
+    endorse(client, child["id"], v_gp["token"])
+    assert endorse(client, child["id"], tokens["validator-a"]).json()["agent_status"] == "trusted"
+
+
+def test_soft_guard_unrelated_promoted_validators_are_independent():
+    _, client, tokens = _setup(lineage_guard="soft")
+    v1 = _promote(client, _trusted(client, tokens, "o1"))
+    v2 = _promote(client, _trusted(client, tokens, "o2"))
+    x = register(client, "x")
+    endorse(client, x["id"], v1["token"])
+    assert endorse(client, x["id"], v2["token"]).json()["agent_status"] == "trusted"
+
+
+def test_soft_guard_trust_lapses_if_the_independent_endorser_is_deactivated():
+    _, client, tokens = _setup(lineage_guard="soft")
+    v_gp, v_p, child = _kin_chain(client, tokens)
+    v_other = _promote(client, _trusted(client, tokens, "other"))
+    for v in (v_gp, v_p, v_other):
+        endorse(client, child["id"], v["token"])
+    assert access(client, child["token"]).status_code == 200
+    client.post(f"/validators/{v_other['id']}/deactivate", headers=ADMIN)
+    assert access(client, child["token"]).status_code == 403  # 2 active endorsements, both kin
+
+
+def test_guard_mode_parsing():
+    import pytest
+    from quorumgraph.config import parse_lineage_guard
+    assert [parse_lineage_guard(v) for v in (True, False, "1", "0", "soft", "block", "off")] == \
+        ["block", "off", "block", "off", "soft", "block", "off"]
+    with pytest.raises(ValueError):
+        parse_lineage_guard("maybe")
+
+
+def test_graph_links_promoted_validators_to_their_agent_and_agent_view_explains_soft_guard():
+    _, client, tokens = _setup(lineage_guard="soft")
+    v_gp, v_p, child = _kin_chain(client, tokens)
+    nodes = {n["id"]: n for n in client.get("/graph", headers=ADMIN).json()["nodes"]}
+    assert nodes[v_gp["id"]]["agent_id"] == v_gp["agent_id"]
+    assert nodes["validator-a"]["agent_id"] is None
+    endorse(client, child["id"], v_gp["token"])
+    endorse(client, child["id"], v_p["token"])
+    d = client.get(f"/agents/{child['id']}").json()
+    assert d["status"] == "pending" and d["needs_independent"] is True
+    assert client.get("/operator/me", headers=ADMIN).json()["lineage_guard"] == "soft"

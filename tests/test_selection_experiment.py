@@ -110,3 +110,48 @@ def test_nepotism_never_touches_the_original_worlds():
     rows = run_one(Config(world="gated", seed=9, **SMALL))
     assert all(r["kin_rubber_stamps"] == 0 and r["kin_shields"] == 0 for r in rows)
     assert all(r["committee_from_population"] == 0 for r in rows)
+
+
+def test_api_audit_channel_goes_through_spot_checks_with_escalation():
+    w, rows, paths = _paths("gated", audit_prob=0.5, audit_channel="api")
+    assert sum(p == "/spot-checks/sample" for p in paths) == len(rows)
+    assert any(p.endswith("/result") for p in paths)
+    assert sum(r["spot_confirmations"] for r in rows) > 0
+    assert all(r["audit_channel"] == "api" for r in rows)
+
+
+def test_api_single_never_escalates():
+    _, rows, _ = _paths("gated", audit_prob=0.5, audit_channel="api_single")
+    assert sum(r["spot_fails"] for r in rows) > 0
+    assert sum(r["spot_confirmations"] for r in rows) == 0
+
+
+def test_sim_channel_never_calls_spot_checks():
+    _, _, paths = _paths("gated", audit_prob=0.5)
+    assert not any(p.startswith("/spot-checks") for p in paths)
+
+
+def test_drift_redraws_the_defect_trait_and_zero_drift_changes_nothing():
+    base = run_one(Config(world="gated", seed=3, **SMALL))
+    zero = run_one(Config(world="gated", seed=3, drift_prob=0.0, **SMALL))
+    assert _strip(base) == _strip(zero)
+    full = run_one(Config(world="gated", seed=3, drift_prob=1.0, **SMALL))
+    assert all(r["frac_drifted"] == 1.0 for r in full[1:])
+    assert full[-1]["mean_defect"] != base[-1]["mean_defect"]
+
+
+def test_soft_world_lets_kin_endorse_but_never_trusts_on_kin_alone():
+    w, rows, _ = _paths("recursive_soft", init_nepotism_max=1.0)
+    assert sum(r["kin_rubber_stamps"] for r in rows) > 0
+    assert sum(r["kin_blocked"] for r in rows) == 0  # soft mode never 403s
+    # every trusted agent in the DB has at least one endorser outside its lineage
+    from quorumgraph import trust
+    from quorumgraph.models import Agent as DBAgent, AgentStatus
+    w2 = World(Config(world="recursive_soft", seed=5, pop_size=30, generations=8, init_nepotism_max=1.0))
+    w2.client.close = lambda: None
+    w2.app.state.engine.dispose = lambda: None
+    w2.run()
+    with w2.app.state.sessionmaker() as s:
+        for a in s.query(DBAgent).filter(DBAgent.status == AgentStatus.TRUSTED):
+            if trust.evaluate(s, a).status is AgentStatus.TRUSTED:
+                assert trust._has_independent_endorser(s, a)

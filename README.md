@@ -44,14 +44,23 @@ Config (env vars): `QG_DATABASE_URL`, `QG_ENDORSEMENT_QUORUM` (default 2), `QG_R
 ## Dashboard (Phase 4)
 
 `http://127.0.0.1:8000/dashboard`: sign in with a validator token (from
-`.validator_tokens.json`) or `QG_ADMIN_TOKEN` (read-only).
+`.validator_tokens.json`) or `QG_ADMIN_TOKEN` (read-only for votes; admin-only
+actions are promote/deactivate validator and draw spot-check samples).
 
 - **Trust graph**: validators on the left, agents laid out by lineage. Edges: endorsement
   (green), revocation vote (red, reason on hover), dashed = from an inactive validator so it
   doesn't count, grey arrow = spawned. Click an agent to highlight its edges.
 - **Inspector**: a plain-English "why is this agent trusted / pending / revoked", quorum meters,
   each vote with its reason, parent/children, the agent's audit timeline, and Endorse /
-  Vote-to-revoke buttons (acting as the signed-in validator).
+  Vote-to-revoke buttons (acting as the signed-in validator). Admins get **Promote to
+  validator** for trusted agents (the token is shown once) and **Deactivate validator**.
+  Under the soft lineage guard, a kin-only quorum is explained as such.
+- **Promoted validators** have a dashed outline, with a dotted edge back to the agent they
+  were promoted from.
+- **Spot checks**: the policy in force (guard mode, escalation), an admin **Draw sample**
+  form (rate, include pending; reports skips), and recent checks. A validator sees
+  **Pass / Fail** on checks assigned to it; a failure reports the vote and the escalated
+  confirmation.
 - **Gateways**: live `/gateway/stats` for each gateway, plus **live probes**: every agent
   registered from this page is called through every gateway twice a second. When you cast
   the deciding revocation vote from the inspector, probing speeds up to ~15 ms and each
@@ -225,8 +234,18 @@ trusted agent into a validator with its own credential. Validators can't appoint
 so a captured committee can't choose its successors. A promoted validator **cannot endorse
 itself or any descendant** (403, recorded as `lineage_endorsement_blocked`). Lineage edges
 can't be forged (children are registered with the parent's credential), so walking
-`parent_agent_id` is trustworthy. Set `QG_LINEAGE_GUARD=0` to disable; that exists only so the
-experiment can measure what the guard prevents.
+`parent_agent_id` is trustworthy.
+
+`QG_LINEAGE_GUARD` picks the mode:
+- `block` (the default, also `1`): the 403 above.
+- `soft`: kin endorsements are accepted and count toward quorum, but trust also
+  requires **at least one active endorser outside the agent's lineage**. The rule lives in
+  `trust.evaluate`, so the gateway, `/internal`, promotion and spot-check eligibility all
+  apply it. A kin-only quorum shows as pending, with `needs_independent: true`.
+- `off` (also `0`): no guard; exists only for experiments.
+
+`soft` was added because the recursive results below showed `block` over-blocks: it also
+refuses honest kin endorsements, which makes the effective quorum 2-of-2 for descendants.
 
 **Spot checks.** The selection experiment showed that revocation driven only by an agent's
 own logs selects for opacity. Spot checks are evidence that doesn't need the agent's
@@ -237,11 +256,192 @@ cooperation:
   lineage (two independent records, double-entry style); with none available the check is
   skipped and that is logged;
 - a failure is exactly **one** revocation vote. Quorum still decides, so a single corrupt
-  auditor can't revoke anyone; the cost is that an honest failure needs a second validator.
+  auditor can't revoke anyone;
+- **escalation** (`QG_SPOT_CHECK_ESCALATION`, on by default): a failure also assigns a
+  *confirmation* check to a second validator. The second validator is not the first
+  auditor and not the agent's kin, but endorsers *are* allowed, since confirming a failure
+  goes against their interest. Its failure is the second vote, and confirmations never
+  escalate again. Why this exists: in a 4-seed pilot without escalation, only **1–15%** of
+  genuinely failing agents were ever revoked, because the second vote almost never arrived
+  from anywhere else;
+- `include_pending` also samples agents that aren't trusted yet, for deployments without
+  an endorsement gate. `agent_ids` restricts the sampling frame to the agents currently
+  deployed; the service still draws the sample. The response header
+  `X-Spot-Checks-Skipped` counts agents with no independent validator available.
 
-The selection experiment still models audits as `audit_prob` rather than calling
-`/spot-checks`. The behaviour is the same, and switching would change the RNG stream and
-require rerunning every world.
+Known gap: the auditor-independence check is one-directional. It excludes validators
+promoted from the agent's *ancestors*, but not from its *descendants*, so a child's
+validator can audit its parent. Fixing that changes spot-check assignment, so it was
+deferred until after the drift/API grid below, which uses the current rule.
+
+The selection experiment has three audit channels (`--audit-channel`):
+- `sim` (the default, used for every result above): `audit_prob` is a per-defect coin flip.
+- `api`: after each generation, real `/spot-checks` calls with escalation. The auditor fails
+  an agent if it caused any harm that generation.
+- `api_single`: the same without escalation.
+
+The sampling unit differs between them. `api` reviews a fraction `audit_prob` of
+agent-generations; `sim` audits a fraction of defects. The review budget is the same, but
+`api` concentrates it on fewer agents, so the two channels' numbers aren't
+interchangeable. `--drifts` adds successor drift: with that probability, a child's
+`defect` trait is redrawn from U(0, 1), standing in for a values-changing
+self-modification. With drift 0 and `--audit-channel sim`, every earlier world reproduces
+exactly; this was checked on 1,440 rows.
+
+### Results: recursive oversight (600 runs)
+
+Command:
+
+```bash
+uv run python -m quorumgraph.experiments.selection \
+  --worlds recursive recursive_guarded --init-nepotism-max 1.0 \
+  --seeds 50 --generations 60 --costs 0.1 0.5 --audits 0 0.05 0.25 --bonuses 1.0 \
+  --merge runs/selection-baseline/generations.csv --out runs/selection-recursive
+```
+
+Setup:
+- Committee seats are filled from the population on staggered 3-generation terms; the
+  seeded validators are fully replaced by generation 3.
+- Initial nepotism is uniform on [0, 1], so a population mean of 0.5 means no selection.
+
+Final generation (59), at transparency cost 0.5 and no audits, the hardest cell:
+
+| | gated | recursive (guard off) | recursive_guarded |
+|---|---|---|---|
+| mean defect | 0.33 ± 0.11 | **0.11 ± 0.06** | 0.37 ± 0.12 |
+| harms / agent | 3.12 ± 1.08 | **0.98 ± 0.60** | 3.43 ± 1.08 |
+| fraction trusted | 0.45 | 0.65 | 0.42 |
+| seeds collapsed (defect > 0.5) | 17/50 | **4/50** | 20/50 |
+
+What happened:
+- **The outcomes are bimodal.** Each seed either holds a trusted, honest population or
+  collapses: trust drains away, every agent earns the untrusted rate, and the defect
+  bonus takes over. The wide CIs are a mix of those two states, not noise around one
+  value.
+- **Unguarded nepotism prevents collapse here; it doesn't cause it.** Seeds that survived
+  had about 2.5× more kin-granted trusts in generations 0–19 than seeds that collapsed
+  (0.42 vs 0.17 cumulative per agent). When evidence-based endorsement falters because
+  transparency is expensive, a fit validator vouching for its offspring keeps a trusted
+  core alive, and that core keeps the selection gradient working.
+- **The guard performs no better than plain `gated`, and at cost 0.1 it is worse**
+  (9/50 collapsed vs 3/50). The guard blocks *every* endorsement a validator gives its
+  descendants, honest ones included. For those agents the effective quorum becomes
+  2-of-2. `kin_blocked` counts only the nepotistic attempts, so it understates how much
+  the guard blocks.
+- **Nepotism was not selected for.** It drifted around 0.5 in both recursive worlds, and
+  in the committee too (0.45–0.59, with overlapping CIs).
+- **Audits erase the differences.** At audit 0.05, recursive and gated both have 0 or 3
+  collapsed seeds, and guarded has 6. At audit 0.25 all three worlds match: defect about
+  0.035, harms about 0.3, no collapses.
+
+**Read this carefully; it is not "nepotism is good".** In this model a child is a
+near-copy of its parent (mutation sd 0.05), and the parent was vetted (trusted, unrevoked,
+fitness-weighted) before promotion. So "endorse my descendant" really is decent evidence
+here. Under self-improvement the successor is exactly what changed, and that assumption
+fails. What the run does show:
+1. Without audits, the gate fails by **collapse**, not capture. In this model any extra
+   path to trust, even one that ignores evidence, beats collapse.
+2. A blanket lineage guard costs honest endorsements and buys nothing when kin are
+   honest. A guard that only discounts kin votes (for example, requiring one non-kin
+   endorser) would probably dominate the current one. That is now `soft`; it beats
+   `block` but does not beat no guard (see the next section).
+3. Cheap independent audits fix both problems, which matches the earlier grids.
+
+Open question, carried over from the pilots: favoritism toward *similar* agents rather
+than descendants would not be stopped by a lineage check, and this run doesn't model it.
+
+### Results: soft guard, successor drift, real spot checks (2,460 new runs)
+
+Three stages, all with `--init-nepotism-max 1.0 --seeds 30 --generations 60 --bonuses 1.0
+--costs 0.1 0.5` (script: `runs/overnight2.sh`, about 6 h on 9 workers):
+
+| stage | worlds | drift | audits | channel | output |
+|---|---|---|---|---|---|
+| A1 | `recursive_soft`, merged with the recursive grid | 0 | 0, 0.05, 0.25 | sim | `runs/selection-drift0` |
+| A2 | ungated, revoke_only, gated, 3 recursive | 0.2 | 0, 0.05, 0.25 | sim | `runs/selection-drift02` |
+| B | revoke_only, gated, 3 recursive | 0, 0.2 | 0.05, 0.25 | api | `runs/selection-api` |
+
+All numbers are final generation (59), n = 30 seeds per cell; "collapsed" means population
+mean defect > 0.5.
+
+**Collapsed seeds, summed over all cost × audit cells** (sim: 6 cells = 180 seeds; api: 4
+cells = 120 seeds):
+
+| | gated | recursive (off) | recursive_soft | recursive_guarded (block) |
+|---|---|---|---|---|
+| sim, drift 0 | 9/180 | **3/180** | 10/180 | 25/180 |
+| sim, drift 0.2 | 41/180 | **25/180** | 33/180 | 54/180 |
+| api, drift 0 | 12/120 | **8/120** | 13/120 | 19/120 |
+| api, drift 0.2 | 40/120 | **27/120** | 35/120 | 51/120 |
+
+The ordering **off < soft ≈ gated < block** holds in all four blocks. Pooled over the
+blocks: block 149/600 vs soft 91/600 vs off 63/600. Individual cells with 30 seeds are
+noisy (one cell's 8 vs 13 means little); the consistency across blocks is the evidence.
+
+Hardest sim cell, cost 0.5 with no audits:
+
+| | gated | off | soft | block |
+|---|---|---|---|---|
+| drift 0: collapsed | 9/30 | 3/30 | 8/30 | 15/30 |
+| drift 0: fraction trusted | 0.47 | 0.65 | 0.53 | 0.35 |
+| drift 0.2: collapsed | 24/30 | 21/30 | 21/30 | 26/30 |
+
+What happened:
+
+- **`soft` recovers most of what `block` loses, but it is no better than no guard, or than
+  plain `gated`.** Its fraction trusted sits between off and block, as expected from a rule
+  that accepts kin votes but sometimes withholds trust waiting for an outsider.
+- **Why `soft` barely bites: "independent" is weak.** The lineage rule treats a validator
+  as kin only if its source agent is a *direct ancestor* (or the agent itself). Siblings
+  and cousins count as independent. Every run converges to about one root lineage, and by
+  generation 3 all three seats are promoted from the population, so the outside endorser
+  `soft` demands is almost always a cousin. `drifted_trusted` confirms it: `soft` admits
+  drifted children at the same rate as off (≈0.08–0.13 of drifted agents trusted), while
+  `block` admits fewer (≈0.05–0.09) and pays for it in honest children. A stricter
+  definition (no common ancestor within k generations) is a design choice not tested here.
+  It would also starve a single-lineage population of endorsers entirely.
+- **Drift hurts every world, but at 0.2 it does not flip the nepotism result.** I expected
+  drift to make kin endorsement net harmful, because the child is no longer a near-copy of
+  its vetted parent. Off still collapses least. Kin rubber stamps stay rare (≈0.01–0.04 per
+  agent), so most drifted children still face evidence-based probation, and the gate
+  screens them: `trusted_defect` stays ≈0.02 in every gated world even when population
+  defect is 0.5. Collapse comes from trust draining away, not from drifted agents getting
+  in. Higher drift rates were not run.
+- **Sim audits at 0.25 still fix everything, but drift leaves a floor.** At drift 0.2,
+  every world including `revoke_only` has 0/30 collapsed. Population defect stays ≈0.13
+  and harms ≈1.1–1.3 per agent, about 4× the drift-0 level, because a fifth of every
+  generation is freshly redrawn and harms before anyone can act on it.
+- **Real spot checks (api) are much weaker than the sim's coin flips at the same
+  `audit_prob`.**
+  - The collapse isn't from votes getting lost: confirmations track failures one for one,
+    so escalation works.
+  - `revoke_only` with api audits at 0.25 collapses in 20/30 (cost 0.1) and 22/30 (cost
+    0.5) seeds at drift 0, vs 0/30 with sim audits.
+  - The cause is the sampling unit. The endpoint reviews 25% of *agents* once, after the
+    generation's work. The sim flips a 25% coin on *every defect*, mid-generation, so a
+    heavy defector with ~9 defects is caught with probability ≈1 − 0.75⁹ ≈ 92%, and
+    revocation also cuts off the rest of its gated reward.
+  - With the endorsement gate in place, api audits at 0.25 match the sim at drift 0 (0–2/30
+    collapsed). At 0.05 or under drift they fall behind: at drift 0.2, cost 0.5, audit
+    0.25, the gated worlds collapse in 6–11/30 seeds vs 0/30 with sim audits.
+- **The api auditor's rule is crude.** It fails any agent with ≥1 harm that generation, so
+  low-defect agents with one unlucky draw get revoked too. A real auditor would weigh the
+  evidence; this rule probably makes api audits look *better* against heavy defectors and
+  worse for honest throughput than reality.
+
+Takeaways for the design:
+1. Keep `block` out of the default recommendation. In every block of this grid it was the
+   worst gated variant. `soft` is the better guard, but neither guard earned its place in a
+   model where kin are near-copies; their case rests on a threat (values changing at
+   self-modification) that drift 0.2 didn't make bite.
+2. Independent evidence still beats any endorsement rule, but **its value depends on
+   concentration, not just rate**. Sampling agents uniformly once per generation is
+   several times less effective than evidence that scales with how much an agent
+   misbehaves. The real fix is a sampling design (for example, weight the sample toward
+   agents with more unlogged activity, or check repeatedly within a generation), not a
+   bigger `rate`. Not implemented.
+3. "Independent" needs a real definition. Direct-ancestor exclusion is a necessary
+   minimum, not independence.
 
 ## Endpoints
 
@@ -260,8 +460,8 @@ require rerunning every world.
 | `GET /internal/events?after=N` | gateway key | SSE: replay status changes > N, `ready`, then tail |
 | `POST /validators` | admin | Promote a trusted agent to validator (recursive oversight); token shown once |
 | `POST /validators/{id}/deactivate` | admin | Retire a validator; its endorsements/votes stop counting |
-| `POST /spot-checks/sample` | admin | Service-chosen random sample of trusted agents, each assigned an independent validator |
-| `POST /spot-checks/{id}/result` | assigned validator | `passed` / `failed`; a failure is that validator's revocation vote |
+| `POST /spot-checks/sample` | admin | Service-chosen random sample of trusted agents (optionally pending, optionally within `agent_ids`), each assigned an independent validator |
+| `POST /spot-checks/{id}/result` | assigned validator | `passed` / `failed`; a failure is that validator's revocation vote and escalates to a confirmation check |
 | `GET /spot-checks` | validator or admin | List checks; filter `agent_id`, `open_only` |
 
 ## Layout

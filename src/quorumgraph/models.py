@@ -84,6 +84,8 @@ class SpotCheck(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set on a confirmation check: the failed check it was escalated from.
+    confirms_id: Mapped[int | None] = mapped_column(ForeignKey("spot_checks.id"), nullable=True)
 
 
 class AuditEvent(Base):

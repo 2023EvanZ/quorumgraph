@@ -47,11 +47,13 @@ def test_dashboard_not_in_openapi(client):
 
 def test_operator_me(client, validators, monkeypatch):
     r = client.get("/operator/me", headers=bearer(validators["validator-b"]))
-    assert r.json() == {"operator_id": "validator-b", "kind": "validator"}
+    assert r.json() == {"operator_id": "validator-b", "kind": "validator",
+                        "lineage_guard": "block", "spot_check_escalation": True}
 
     from quorumgraph import config
     monkeypatch.setattr(config, "ADMIN_TOKEN", "adm")
-    assert client.get("/operator/me", headers=bearer("adm")).json() == {"operator_id": "admin", "kind": "admin"}
+    me = client.get("/operator/me", headers=bearer("adm")).json()
+    assert (me["operator_id"], me["kind"]) == ("admin", "admin")
 
     agent = register(client, "alpha")
     assert client.get("/operator/me", headers=bearer(agent["token"])).status_code == 401

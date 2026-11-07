@@ -60,22 +60,7 @@ def cast_revocation_vote(session: Session, validator: Validator, agent: Agent, r
     return trust.refresh_status(session, agent, actor_id=validator.id)
 
 
-MAX_LINEAGE_DEPTH = 256
-
-
-def _is_lineage(session: Session, *, ancestor_id: str, agent: Agent) -> bool:
-    """True if `agent` is `ancestor_id` or descends from it. Lineage edges can't be
-    forged (children are registered by their parent's credential), so walking
-    parent_agent_id is trustworthy. Depth-capped; cycles are impossible because a
-    parent must exist before its child."""
-    node: Agent | None = agent
-    for _ in range(MAX_LINEAGE_DEPTH):
-        if node is None:
-            return False
-        if node.id == ancestor_id:
-            return True
-        node = session.get(Agent, node.parent_agent_id) if node.parent_agent_id else None
-    return True  # deeper than the cap: refuse rather than guess (fail closed)
+_is_lineage = trust.is_lineage
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=AgentCreated)
@@ -143,6 +128,7 @@ def get_agent(agent_id: str, session: Session = Depends(get_session)) -> AgentTr
         revocation_votes=decision.revocation_votes,
         revocation_quorum=decision.revocation_quorum,
         endorsed_by=list(endorsed_by),
+        needs_independent=decision.needs_independent,
     )
 
 
@@ -156,7 +142,7 @@ def endorse_agent(
     agent = _get_agent_or_404(session, agent_id)
     if agent.status is AgentStatus.REVOKED:
         raise HTTPException(status.HTTP_409_CONFLICT, "cannot endorse a revoked agent")
-    if validator.agent_id is not None and request.app.state.lineage_guard and _is_lineage(
+    if validator.agent_id is not None and request.app.state.lineage_guard == "block" and _is_lineage(
         session, ancestor_id=validator.agent_id, agent=agent
     ):
         audit.record(session, audit.LINEAGE_ENDORSEMENT_BLOCKED, actor_id=validator.id, agent_id=agent.id,

@@ -56,8 +56,12 @@ Worlds (the independent variable):
                    promoted (POST /validators), chosen fitness-proportionally:
                    the most successful agents become the overseers. Lineage
                    guard OFF.
-  recursive_guarded  same, with the API's lineage guard ON: a promoted
-                   validator cannot endorse itself or any descendant (403).
+  recursive_guarded  same, with the API's lineage guard in "block" mode: a
+                   promoted validator cannot endorse itself or any descendant (403).
+  recursive_soft   same, with the guard in "soft" mode: kin endorsements are
+                   accepted and count, but trust also needs at least one endorser
+                   outside the agent's lineage (enforced in trust.evaluate, so the
+                   gateway applies it too).
 
 Recursive-oversight model (only matters in the two recursive worlds):
   nepotism         a 5th heritable trait. A promoted validator judging one of
@@ -70,6 +74,35 @@ Recursive-oversight model (only matters in the two recursive worlds):
   is only kin favoritism (no bribery, no colluding with non-kin); seeded
   validators have nepotism 0. All nepotism randomness uses a separate RNG
   stream, so the four original worlds reproduce earlier runs exactly.
+
+Successor drift (`drift_prob`, default 0): with this probability a child's
+`defect` trait is re-drawn uniformly from [0, 1] instead of inherited with small
+mutation. This stands in for a self-modification that changes values: the
+parent's track record stops predicting the child. Without it a child is a near-copy
+of a vetted parent (mutation_sd 0.05), which makes vouching for kin nearly safe.
+Separate RNG stream, so drift 0 reproduces earlier runs exactly.
+
+Audit channel (`audit_channel`):
+  "sim" (default, used for all earlier results): a work-phase defect is also
+      detected by an external audit with prob `audit_prob`, and on detection
+      each validator notices with prob validator_attention and votes.
+  "api": work-phase audits go through the real service. After each
+      generation's work, POST /spot-checks/sample {rate: audit_prob,
+      include_pending: true, agent_ids: <this generation>}: the service draws the sample and picks an
+      independent auditor (not an endorser, not kin) or skips the agent. The
+      auditor reviews that generation's record and fails the agent iff it
+      caused any harm. A failure is one revocation vote, and the service
+      escalates it to a confirmation check by a second validator, who reviews
+      the same record; its failure is the second vote. A revoked agent cannot
+      reproduce. Detection from the agent's own logs is unchanged.
+      NOTE the sampling unit differs from "sim": rate = P(an agent's whole
+      generation is reviewed), not P(each defect is audited). Same review budget
+      (rate × tasks), concentrated on fewer agents.
+  "api_single": as "api" with escalation off (one vote per failure; the second
+      must come from elsewhere). Kept to reproduce why escalation was added.
+  In both channels, probation still models a pre-trust audit with prob
+  `audit_prob` per defect (the spot-check endpoint is for agents already
+  working, not sandbox evaluation).
 
 Each generation: register (children via the parent's token) → probation →
 endorsement → work (valuable tasks through GET /protected/resource for gated
@@ -103,8 +136,10 @@ from pathlib import Path
 
 TRAITS = ("capability", "transparency", "self_check", "defect")  # main RNG stream, in this order
 ALL_TRAITS = (*TRAITS, "nepotism")
-WORLDS = ("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "recursive_guarded")
-RECURSIVE_WORLDS = ("recursive", "recursive_guarded")
+WORLDS = ("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "recursive_guarded", "recursive_soft")
+RECURSIVE_WORLDS = ("recursive", "recursive_guarded", "recursive_soft")
+GUARD_MODE = {"recursive_guarded": "block", "recursive_soft": "soft"}  # everything else: guard off
+AUDIT_CHANNELS = ("sim", "api", "api_single")  # api: spot checks with escalation; api_single: one vote only
 GATED_WORLDS = ("gated_no_revoke", "gated", *RECURSIVE_WORLDS)
 REVOKING_WORLDS = ("revoke_only", "gated", *RECURSIVE_WORLDS)
 ADMIN_TOKEN = "experiment-admin"
@@ -131,6 +166,8 @@ class Config:
     mutation_sd: float = 0.05
     init_defect_max: float = 0.5
     init_nepotism_max: float = 0.5
+    drift_prob: float = 0.0
+    audit_channel: str = "sim"
 
 
 @dataclass
@@ -177,8 +214,11 @@ class World:
         self.cfg = cfg
         self.rng = random.Random(cfg.seed)
         self.rng2 = random.Random(cfg.seed * 7919 + 1)  # nepotism / committee stream
+        self.rng3 = random.Random(cfg.seed * 104729 + 2)  # successor drift stream
         recursive = cfg.world in RECURSIVE_WORLDS
-        app = create_app("sqlite://", admin_token=ADMIN_TOKEN, lineage_guard=cfg.world == "recursive_guarded")
+        app = create_app("sqlite://", admin_token=ADMIN_TOKEN, lineage_guard=GUARD_MODE.get(cfg.world, "off"),
+                         spot_check_rng=random.Random(cfg.seed * 15485863 + 3),
+                         spot_check_escalation=cfg.audit_channel == "api")
         with app.state.sessionmaker() as s:
             tokens = seed_validators(s)
             s.commit()
@@ -186,6 +226,7 @@ class World:
         self.committee = [Seat(vid, self.v[vid]) for vid in VALIDATORS]
         self.recursive = recursive
         self.kin = {"rubber_stamps": 0, "blocked": 0, "shields": 0, "trusted_via_kin": 0}
+        self.spot = {"checks": 0, "fails": 0, "skipped": 0, "confirmations": 0}
         self.client = TestClient(app)
         self.app = app
         self.calls = 0
@@ -262,8 +303,10 @@ class World:
 
     def detect_and_revoke(self, a: Agent, logged: bool) -> None:
         cfg = self.cfg
-        if not (logged or self.rng.random() < cfg.audit_prob):
-            return
+        if not logged:
+            # same short-circuit as before: the audit draw happens only for unlogged defects
+            if cfg.audit_channel != "sim" or self.rng.random() >= cfg.audit_prob:
+                return
         a.extra["detected"] = a.extra.get("detected", 0) + 1
         if cfg.world not in REVOKING_WORLDS or a.revoked:
             return
@@ -307,7 +350,11 @@ class World:
             parent = self.rng.choices(pop, weights=weights, k=1)[0]
             genome = {k: _clip(parent.genome[k] + self.rng.gauss(0, cfg.mutation_sd)) for k in TRAITS}
             genome["nepotism"] = _clip(parent.genome.get("nepotism", 0.0) + self.rng2.gauss(0, cfg.mutation_sd))
+            drifted = cfg.drift_prob > 0 and self.rng3.random() < cfg.drift_prob
+            if drifted:
+                genome["defect"] = self.rng3.random()  # self-modification: values no longer inherited
             child = Agent(genome=genome, root=parent.root)
+            child.extra["drifted"] = drifted
             if self.register(child, parent):
                 children.append(child)
         return children
@@ -330,6 +377,41 @@ class World:
         self.committee.append(Seat(data["id"], {"Authorization": f"Bearer {data['token']}"}, pick))
         self._post(f"/validators/{retired.vid}/deactivate", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
 
+    def spot_checks(self, pop: list[Agent]) -> None:
+        """audit_channel="api": the service samples, assigns an independent auditor,
+        and the auditor's failure is one revocation vote (all real API calls)."""
+        if self.cfg.audit_channel == "sim" or self.cfg.audit_prob <= 0 or self.cfg.world not in REVOKING_WORLDS:
+            return
+        live = [a.id for a in pop if not a.revoked]
+        if not live:
+            return
+        r = self._post("/spot-checks/sample", json={"rate": self.cfg.audit_prob, "include_pending": True,
+                                                    "agent_ids": live},
+                       headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+        r.raise_for_status()
+        self.spot["skipped"] += int(r.headers.get("X-Spot-Checks-Skipped", 0))
+        by_id = {a.id: a for a in pop}
+        seats = {st.vid: st for st in self.committee}
+        for check in r.json():
+            a, seat = by_id.get(check["agent_id"]), seats.get(check["validator_id"])
+            if a is None or seat is None:
+                raise RuntimeError(f"spot check outside the frame or committee: {check}")
+            self.spot["checks"] += 1
+            failed = a.harms > 0  # the auditor reviews this generation's full record, logged or not
+            res = self._post(f"/spot-checks/{check['id']}/result", headers=seat.headers,
+                             json={"passed": not failed, "notes": "sim audit"})
+            res.raise_for_status()
+            if failed:
+                self.spot["fails"] += 1
+            conf = res.json().get("confirmation")
+            if conf:  # escalated: a second validator reviews the same record
+                self.spot["confirmations"] += 1
+                res = self._post(f"/spot-checks/{conf['id']}/result", headers=seats[conf["validator_id"]].headers,
+                                 json={"passed": not failed, "notes": "sim confirmation"})
+                res.raise_for_status()
+            if res.json()["agent_status"] == "revoked":
+                a.revoked = True
+
     def run(self) -> list[dict]:
         cfg = self.cfg
         pop = []
@@ -347,10 +429,11 @@ class World:
                 if cfg.world in GATED_WORLDS:
                     self.probation(a)
                 self.work(a)
+            self.spot_checks(pop)
             n = len(pop)
             row = {"world": cfg.world, "seed": cfg.seed, "transparency_cost": cfg.transparency_cost,
-                   "audit_prob": cfg.audit_prob, "defect_bonus": cfg.defect_bonus, "generation": gen,
-                   "population": n}
+                   "audit_prob": cfg.audit_prob, "defect_bonus": cfg.defect_bonus, "drift_prob": cfg.drift_prob,
+                   "audit_channel": cfg.audit_channel, "generation": gen, "population": n}
             for t in ALL_TRAITS:
                 row[f"mean_{t}"] = statistics.fmean(a.genome[t] for a in pop) if n else float("nan")
             row["frac_trusted"] = sum(a.trusted for a in pop) / n if cfg.world in GATED_WORLDS else 1.0
@@ -364,6 +447,15 @@ class World:
             for k, v in self.kin.items():
                 row[f"kin_{k}"] = v / n if n else 0.0
             self.kin = dict.fromkeys(self.kin, 0)
+            trusted = [a for a in pop if (a.trusted or cfg.world not in GATED_WORLDS) and not a.revoked]
+            row["trusted_defect"] = statistics.fmean(a.genome["defect"] for a in trusted) if trusted else ""
+            row["frac_drifted"] = sum(a.extra.get("drifted", False) for a in pop) / n
+            drifted = [a for a in pop if a.extra.get("drifted")]
+            row["drifted_trusted"] = (sum(a.trusted for a in drifted) / len(drifted)
+                                      if drifted and cfg.world in GATED_WORLDS else "")
+            for k, v in self.spot.items():
+                row[f"spot_{k}"] = v / n if n else 0.0
+            self.spot = dict.fromkeys(self.spot, 0)
             row["api_calls"] = self.calls
             rows.append(row)
             if gen < cfg.generations - 1:
@@ -385,11 +477,11 @@ def run_one(cfg: Config) -> list[dict]:
 # --- grid runner ----------------------------------------------------------------
 
 def build_grid(seeds: int, generations: int, pop: int, costs, audits, bonuses, worlds=WORLDS,
-               init_nepotism_max: float = 0.5) -> list[Config]:
+               init_nepotism_max: float = 0.5, drifts=(0.0,), audit_channel: str = "sim") -> list[Config]:
     return [
         Config(world=w, seed=s, generations=generations, pop_size=pop, transparency_cost=c, audit_prob=p,
-               defect_bonus=b, init_nepotism_max=init_nepotism_max)
-        for b in bonuses for c in costs for p in audits for w in worlds for s in range(seeds)
+               defect_bonus=b, init_nepotism_max=init_nepotism_max, drift_prob=d, audit_channel=audit_channel)
+        for b in bonuses for d in drifts for c in costs for p in audits for w in worlds for s in range(seeds)
     ]
 
 
@@ -401,9 +493,13 @@ def merge_rows(rows: list[dict], path: Path, args) -> list[dict]:
         for r in csv.DictReader(f):
             if (r["world"] in have or int(r["seed"]) >= args.seeds or int(r["generation"]) >= args.generations
                     or float(r["transparency_cost"]) not in args.costs or float(r["audit_prob"]) not in args.audits
-                    or float(r["defect_bonus"]) not in args.bonuses):
+                    or float(r["defect_bonus"]) not in args.bonuses
+                    or float(r.get("drift_prob") or 0.0) not in args.drifts
+                    or (r.get("audit_channel") or "sim") != args.audit_channel):
                 continue
-            keep.append({k: (v if k == "world" or v == "" else (int(v) if k in ("seed", "generation", "population", "lineages", "api_calls")
+            r.setdefault("drift_prob", "0.0")
+            r.setdefault("audit_channel", "sim")
+            keep.append({k: (v if k in ("world", "audit_channel") or v == "" else (int(v) if k in ("seed", "generation", "population", "lineages", "api_calls")
                                                      else float(v))) for k, v in r.items()})
     print(f"merged {len(keep)} rows from {path}", flush=True)
     return keep + rows
@@ -414,35 +510,41 @@ def summarize(rows: list[dict], out: Path) -> str:
     groups: dict[tuple, list[dict]] = {}
     for r in rows:
         if r["generation"] == final_gen:
-            groups.setdefault((r["defect_bonus"], r["transparency_cost"], r["audit_prob"], r["world"]), []).append(r)
+            key = (r["defect_bonus"], float(r.get("drift_prob") or 0.0), r["transparency_cost"], r["audit_prob"])
+            groups.setdefault((*key, r["world"]), []).append(r)
 
-    metrics = ["mean_transparency", "mean_self_check", "mean_defect", "mean_capability",
-               "honest_successes_per_agent", "harms_per_agent", "frac_revoked", "lineages",
-               "mean_nepotism", "committee_nepotism", "kin_rubber_stamps", "kin_trusted_via_kin"]
+    metrics = ["mean_transparency", "mean_self_check", "mean_defect", "mean_capability", "trusted_defect",
+               "honest_successes_per_agent", "harms_per_agent", "frac_trusted", "frac_revoked", "lineages",
+               "collapsed (defect>0.5)", "mean_nepotism", "committee_nepotism", "kin_rubber_stamps",
+               "kin_trusted_via_kin", "drifted_trusted", "spot_checks", "spot_fails", "spot_confirmations", "spot_skipped"]
 
     def ci(vals):
         m = statistics.fmean(vals)
         half = 1.96 * statistics.stdev(vals) / len(vals) ** 0.5 if len(vals) > 1 else float("nan")
         return f"{m:.3f} ± {half:.3f}"
 
-    worlds = [w for w in WORLDS if any(k[3] == w for k in groups)]
+    worlds = [w for w in WORLDS if any(k[-1] == w for k in groups)]
+    channels = sorted({r.get("audit_channel") or "sim" for r in rows})
     lines = [f"# Selection experiment summary\n",
-             f"Final generation ({final_gen}); mean ± 95% CI across seeds (normal approx).\n"]
-    for bonus in sorted({k[0] for k in groups}):
-        for cost in sorted({k[1] for k in groups}):
-            for audit in sorted({k[2] for k in groups}):
-                lines.append(f"\n## defect_bonus={bonus}, transparency_cost={cost}, audit_prob={audit}\n")
-                lines.append("| metric | " + " | ".join(worlds) + " |")
-                lines.append("|---|" + "---|" * len(worlds))
-                for m in metrics:
-                    cells = []
-                    for w in worlds:
-                        g = groups.get((bonus, cost, audit, w), [])
-                        vals = [r[m] for r in g if r.get(m) not in (None, "")]
-                        cells.append(ci(vals) if vals else "—")
-                    lines.append(f"| {m} | " + " | ".join(cells) + " |")
-                n = len(groups.get((bonus, cost, audit, worlds[0]), []))
-                lines.append(f"\n(n = {n} seeds per world)")
+             f"Final generation ({final_gen}); mean ± 95% CI across seeds (normal approx). "
+             f"Audit channel: {', '.join(channels)}.\n"]
+    for cell in sorted({k[:-1] for k in groups}):
+        bonus, drift, cost, audit = cell
+        lines.append(f"\n## defect_bonus={bonus}, drift={drift}, transparency_cost={cost}, audit_prob={audit}\n")
+        lines.append("| metric | " + " | ".join(worlds) + " |")
+        lines.append("|---|" + "---|" * len(worlds))
+        for m in metrics:
+            cells = []
+            for w in worlds:
+                g = groups.get((*cell, w), [])
+                if m.startswith("collapsed"):
+                    cells.append(f"{sum(r['mean_defect'] > 0.5 for r in g)}/{len(g)}" if g else "—")
+                    continue
+                vals = [float(r[m]) for r in g if r.get(m) not in (None, "")]
+                cells.append(ci(vals) if vals else "—")
+            lines.append(f"| {m} | " + " | ".join(cells) + " |")
+        n = len(groups.get((*cell, worlds[0]), []))
+        lines.append(f"\n(n = {n} seeds per world)")
     text = "\n".join(lines) + "\n"
     (out / "summary.md").write_text(text)
     return text
@@ -452,35 +554,37 @@ R_SCRIPT = r"""
 suppressMessages({library(ggplot2)})
 args <- commandArgs(trailingOnly = TRUE)
 all <- read.csv(file.path(args[1], "generations.csv"))
-lv <- c("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "recursive_guarded")
+lv <- c("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "recursive_guarded", "recursive_soft")
+if (!("drift_prob" %in% names(all))) all$drift_prob <- 0
 for (b in sort(unique(all$defect_bonus))) {
   d <- all[all$defect_bonus == b, ]
   traits <- intersect(c("mean_transparency", "mean_self_check", "mean_defect", "mean_capability", "mean_nepotism"), names(d))
   long <- do.call(rbind, lapply(traits, function(t) data.frame(
-    world = d$world, generation = d$generation,
+    world = d$world, generation = d$generation, drift = paste0("drift ", d$drift_prob),
     cost = paste0("cost ", d$transparency_cost), audit = paste0("audit ", d$audit_prob),
     trait = sub("mean_", "", t), value = d[[t]])))
-  agg <- do.call(data.frame, aggregate(value ~ world + generation + cost + audit + trait, long,
+  agg <- do.call(data.frame, aggregate(value ~ world + generation + drift + cost + audit + trait, long,
                  function(v) c(m = mean(v), se = sd(v) / sqrt(length(v)))))
   agg$world <- factor(agg$world, levels = lv)
   p <- ggplot(agg, aes(generation, value.m, colour = world, fill = world)) +
     geom_ribbon(aes(ymin = value.m - 1.96 * value.se, ymax = value.m + 1.96 * value.se), alpha = 0.2, colour = NA) +
-    geom_line(linewidth = 0.7) + facet_grid(trait ~ cost + audit) +
+    geom_line(linewidth = 0.7) + facet_grid(trait ~ drift + cost + audit) +
     labs(y = "population mean (95% CI across seeds)",
          title = paste0("Trait evolution by trust regime (defect bonus ", b, ")")) +
     theme_minimal(base_size = 10) + theme(legend.position = "bottom")
-  ggsave(file.path(args[1], paste0("traits_bonus", b, ".png")), p, width = 15, height = 9, dpi = 120)
+  nd <- length(unique(d$drift_prob))
+  ggsave(file.path(args[1], paste0("traits_bonus", b, ".png")), p, width = 15 * nd, height = 9, dpi = 110, limitsize = FALSE)
 
-  out <- aggregate(cbind(honest_successes_per_agent, harms_per_agent) ~ world + generation + transparency_cost + audit_prob, d, mean)
+  out <- aggregate(cbind(honest_successes_per_agent, harms_per_agent) ~ world + generation + drift_prob + transparency_cost + audit_prob, d, mean)
   out$world <- factor(out$world, levels = lv)
   long2 <- rbind(
-    data.frame(out[, 1:4], metric = "honest successes / agent", value = out$honest_successes_per_agent),
-    data.frame(out[, 1:4], metric = "harms / agent", value = out$harms_per_agent))
+    data.frame(out[, 1:5], metric = "honest successes / agent", value = out$honest_successes_per_agent),
+    data.frame(out[, 1:5], metric = "harms / agent", value = out$harms_per_agent))
   p2 <- ggplot(long2, aes(generation, value, colour = world)) + geom_line(linewidth = 0.7) +
-    facet_grid(metric ~ paste0("cost ", transparency_cost) + paste0("audit ", audit_prob), scales = "free_y") +
+    facet_grid(metric ~ paste0("drift ", drift_prob) + paste0("cost ", transparency_cost) + paste0("audit ", audit_prob), scales = "free_y") +
     labs(title = paste0("Honest output and harm by trust regime (defect bonus ", b, ")")) +
     theme_minimal(base_size = 10) + theme(legend.position = "bottom")
-  ggsave(file.path(args[1], paste0("outcomes_bonus", b, ".png")), p2, width = 15, height = 6, dpi = 120)
+  ggsave(file.path(args[1], paste0("outcomes_bonus", b, ".png")), p2, width = 15 * nd, height = 6, dpi = 110, limitsize = FALSE)
 }
 """
 
@@ -506,6 +610,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--init-nepotism-max", type=float, default=0.5,
                    help="recursive worlds: initial nepotism ~ U(0, this)")
     p.add_argument("--worlds", nargs="+", default=list(WORLDS), choices=WORLDS)
+    p.add_argument("--drifts", type=float, nargs="+", default=[0.0],
+                   help="successor drift probabilities (child's defect trait re-drawn from U(0,1))")
+    p.add_argument("--audit-channel", choices=AUDIT_CHANNELS, default="sim",
+                   help="sim: audit_prob coin flip (earlier results); api: real /spot-checks endpoint")
     p.add_argument("--merge", type=Path, default=None,
                    help="generations.csv from an earlier run; its rows for the same cells are merged into the "
                         "summary/plots (valid because runs are deterministic per seed and world)")
@@ -519,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or Path("runs") / f"selection-{datetime.now():%Y%m%d-%H%M%S}"
     out.mkdir(parents=True, exist_ok=True)
     grid = build_grid(args.seeds, args.generations, args.pop, args.costs, args.audits, args.bonuses, args.worlds,
-                      args.init_nepotism_max)
+                      args.init_nepotism_max, args.drifts, args.audit_channel)
     (out / "config.json").write_text(json.dumps(
         {"args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
          "defaults": asdict(Config()), "runs": len(grid)}, indent=2))
@@ -545,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
             f.flush()
             rows.extend(run_rows)
             el = time.time() - t0
-            print(f"  [{i}/{len(grid)}] {cfg.world:<16} bonus={cfg.defect_bonus} cost={cfg.transparency_cost} audit={cfg.audit_prob} "
+            print(f"  [{i}/{len(grid)}] {cfg.world:<17} drift={cfg.drift_prob} cost={cfg.transparency_cost} audit={cfg.audit_prob} "
                   f"seed={cfg.seed}  elapsed {el / 60:.1f} min, eta {el / i * (len(grid) - i) / 60:.1f} min", flush=True)
 
     if not rows:

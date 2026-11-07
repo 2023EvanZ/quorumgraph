@@ -69,6 +69,8 @@ const state = {
   graphKey: "",
   audit: [],
   auditKey: "",
+  spot: [],
+  spotKey: "",
   selected: null,           // agent id
   detail: null,             // GET /agents/{id}
   detailAudit: [],
@@ -143,12 +145,15 @@ function signOut() {
   state.graphKey = "";
   state.audit = [];
   state.auditKey = "";
+  state.spot = [];
+  state.spotKey = "";
   state.selected = null;
   store.set("sessionStorage", "qg.operatorToken", null);
   renderWhoami();
   renderGraph();
   renderAudit();
   renderInspector();
+  renderSpot();
 }
 
 function renderWhoami() {
@@ -159,6 +164,10 @@ function renderWhoami() {
   $("token").hidden = signedIn;
   $("signin-btn").hidden = signedIn;
   $("signout-btn").hidden = !signedIn;
+  $("sample-form").hidden = !(signedIn && state.me.kind === "admin");
+  $("policy").textContent = signedIn
+    ? `lineage guard: ${state.me.lineage_guard ?? "?"} · escalation: ${state.me.spot_check_escalation ? "on" : "off"}`
+    : "";
 }
 
 // --------------------------------------------------------------- refreshing
@@ -167,7 +176,7 @@ async function refresh() {
   if (!state.me || state.busy) return;
   state.busy = true;
   try {
-    const [g, a] = await Promise.all([api("/graph"), api("/audit?limit=40")]);
+    const [g, a, sc] = await Promise.all([api("/graph"), api("/audit?limit=40"), api("/spot-checks?limit=15")]);
     if (g.status === 401 || a.status === 401) {
       banner("Your operator token is no longer valid (validator deactivated?). Signed out.");
       signOut();
@@ -190,6 +199,14 @@ async function refresh() {
         state.audit = a.data;
         state.auditKey = key;
         renderAudit();
+      }
+    }
+    if (sc.ok) {
+      const key = JSON.stringify(sc.data);
+      if (key !== state.spotKey) {
+        state.spot = sc.data;
+        state.spotKey = key;
+        renderSpot();
       }
     }
     if (state.selected) await loadDetail(state.selected);
@@ -305,14 +322,25 @@ function renderGraph() {
         : `${nameOf(e.source)} spawned ${nameOf(e.target)}`;
     edgeLayer.append(s("path", { d, class: cls, "marker-end": e.type === "lineage" ? "url(#arrow)" : null }, s("title", { text: title })));
   }
+  for (const v of validators) {
+    if (!v.agent_id) continue;
+    const a = pos.get(v.agent_id), b = pos.get(v.id);
+    if (!a || !b) continue;
+    const dim = sel && v.agent_id !== sel ? " dim" : "";
+    const cx = (a.x + b.x) / 2;
+    edgeLayer.append(s("path", {
+      d: `M${a.x - 16} ${a.y} C${cx} ${a.y - 30}, ${cx} ${b.y - 30}, ${b.x + 50} ${b.y - 8}`,
+      class: `edge promotion${v.active ? "" : " inactive"}${dim}`,
+    }, s("title", { text: `${nameOf(v.agent_id)} was promoted to validator ${v.label}${v.active ? "" : " (now inactive)"}` })));
+  }
   svg.append(edgeLayer);
 
   for (const v of validators) {
     const p = pos.get(v.id);
-    svg.append(s("g", { class: `node validator${v.active ? "" : " inactive"}` },
+    svg.append(s("g", { class: `node validator${v.active ? "" : " inactive"}${v.agent_id ? " promoted" : ""}` },
       s("rect", { x: p.x - 50, y: p.y - 15, width: 100, height: 30, rx: 7 }),
       s("text", { x: p.x, y: p.y + 4, "text-anchor": "middle", text: v.label }),
-      s("title", { text: `${v.id}${v.active ? "" : " (inactive)"}` })));
+      s("title", { text: `${v.id}${v.agent_id ? ` · promoted from ${nameOf(v.agent_id)}` : " · seeded"}${v.active ? "" : " (inactive)"}` })));
   }
 
   for (const a of agents) {
@@ -344,6 +372,7 @@ function meter(kind, have, need) {
 function whySentence(d) {
   if (d.status === "revoked") return `Revoked: ${d.revocation_votes} of ${d.revocation_quorum} required revocation votes. Revocation is permanent; this credential is dead at every gateway.`;
   if (d.status === "trusted") return `Trusted: endorsed by ${d.endorsements} of the ${d.endorsement_quorum} distinct active validators required.` + (d.revocation_votes ? ` ${d.revocation_votes} of ${d.revocation_quorum} revocation votes so far.` : "");
+  if (d.needs_independent) return `Pending: ${d.endorsements} endorsements meet the count, but every one comes from a validator promoted out of this agent's own lineage. The lineage guard (soft mode) requires at least one independent endorser.`;
   return `Pending: ${d.endorsements} of ${d.endorsement_quorum} required endorsements. Gateways deny it until quorum is met.`;
 }
 
@@ -397,6 +426,35 @@ function renderInspector() {
     onclick: (ev) => doRevoke(ev.currentTarget),
     text: iVoted ? "Revocation vote cast" : "Vote to revoke" });
 
+  // Recursive oversight: this agent as a validator (admin-only actions)
+  const seat = (state.graph?.nodes ?? []).find((n) => n.type === "validator" && n.agent_id === d.id && n.active);
+  const isAdmin = me.kind === "admin";
+  const promoMsg = h("p", { class: "msg", role: "status" });
+  const doPromote = async (btn) => {
+    btn.disabled = true;
+    const res = await api("/validators", { method: "POST", body: { agent_id: d.id, name: `${d.name} (validator)`.slice(0, 100) } });
+    promoMsg.className = `msg ${res.ok ? "ok" : "err"}`;
+    if (res.ok) {
+      promoMsg.replaceChildren(
+        h("span", { text: `Validator ${res.data.id} created. Its token is shown once; copy it now: ` }),
+        h("code", { class: "mono token-once", text: res.data.token }));
+    } else promoMsg.textContent = detailOf(res);
+    await refresh();
+  };
+  const doDeactivate = async (btn) => {
+    btn.disabled = true;
+    const res = await api(`/validators/${encodeURIComponent(seat.id)}/deactivate`, { method: "POST" });
+    promoMsg.className = `msg ${res.ok ? "ok" : "err"}`;
+    promoMsg.textContent = res.ok ? `Validator ${seat.label} deactivated; its endorsements and votes no longer count.` : detailOf(res);
+    await refresh();
+  };
+  const oversight = seat
+    ? h("div", { class: "row" }, h("span", { class: "hint", text: `Serves as validator ${seat.label}.` }),
+        isAdmin ? h("button", { type: "button", class: "ghost", onclick: (ev) => doDeactivate(ev.currentTarget), text: "Deactivate validator" }) : null)
+    : isAdmin && d.status === "trusted"
+      ? h("div", { class: "row" }, h("button", { type: "button", class: "ghost", onclick: (ev) => doPromote(ev.currentTarget), text: "Promote to validator" }))
+      : null;
+
   root.replaceChildren(
     h("div", { class: "insp-head" },
       h("h3", { text: d.name }),
@@ -433,7 +491,9 @@ function renderInspector() {
       iAmValidator ? null : h("p", { class: "hint", text: "Signed in as admin: read-only. Sign in with a validator token to vote." }),
       h("div", { class: "row" }, endorseBtn),
       h("div", { class: "row" }, reasonInput, revokeBtn),
-      msg),
+      msg,
+      oversight,
+      promoMsg),
     h("h3", { text: "Timeline" }),
     h("ol", { class: "timeline" }, state.detailAudit.slice().reverse().map((e) => h("li", {},
       h("time", { text: clock(e.created_at) }),
@@ -450,7 +510,57 @@ function eventDetail(e) {
   if (e.event_type === "access_denied") return d.reason;
   if (e.event_type === "agent_registered" && d.parent_agent_id) return `child of ${nameOf(d.parent_agent_id)}`;
   if (e.event_type === "registration_denied") return `tried to spawn “${d.requested_name}”: ${d.reason}`;
+  if (e.event_type === "validator_promoted") return `now validator ${nameOf(d.validator_id) ?? ""}`.trim();
+  if (e.event_type === "lineage_endorsement_blocked") return `${nameOf(e.actor_id)} is promoted from this agent's lineage`;
+  if (e.event_type === "spot_check_assigned") return d.skipped ? `skipped: ${d.skipped}` : `#${d.spot_check_id} → ${nameOf(d.validator_id)}`;
+  if (e.event_type === "spot_check_escalated") return d.skipped ? `#${d.spot_check_id}: ${d.skipped}` : `#${d.spot_check_id} → confirm #${d.confirmation_id} by ${nameOf(d.validator_id)}`;
+  if (e.event_type === "spot_check_passed" || e.event_type === "spot_check_failed") return `#${d.spot_check_id}`;
   return "";
+}
+
+// --------------------------------------------------------------- spot checks
+
+function renderSpot() {
+  const ol = $("spot");
+  if (!state.me) { ol.replaceChildren(h("li", { class: "empty", text: "Sign in to see spot checks." })); return; }
+  if (!state.spot.length) {
+    ol.replaceChildren(h("li", { class: "empty", text: state.me.kind === "admin" ? "None yet. Draw a sample above." : "None yet. An admin draws samples." }));
+    return;
+  }
+  const mine = (c) => state.me.kind === "validator" && c.validator_id === state.me.operator_id && !c.result;
+  const resolve = async (c, passed, btn) => {
+    btn.disabled = true;
+    const res = await api(`/spot-checks/${c.id}/result`, { method: "POST", body: { passed, notes: passed ? "dashboard: passed" : "dashboard: failed" } });
+    const m = $("spot-msg");
+    m.className = `msg ${res.ok ? "ok" : "err"}`;
+    m.textContent = !res.ok ? detailOf(res)
+      : passed ? `#${c.id} passed.`
+        : `#${c.id} failed: one revocation vote cast (agent now ${res.data.agent_status}).`
+          + (res.data.confirmation ? ` Escalated to #${res.data.confirmation.id} for ${nameOf(res.data.confirmation.validator_id)} to confirm.` : "");
+    await refresh();
+  };
+  ol.replaceChildren(...state.spot.map((c) => h("li", { class: c.result ?? "open" },
+    h("span", { class: "mono", text: `#${c.id}` }),
+    h("button", { class: "linklike", type: "button", onclick: () => select(c.agent_id), text: nameOf(c.agent_id) }),
+    h("span", { class: "hint", text: `${c.confirms_id ? `confirms #${c.confirms_id} · ` : ""}auditor ${nameOf(c.validator_id)}` }),
+    mine(c)
+      ? h("span", { class: "row" },
+          h("button", { type: "button", class: "ghost", onclick: (ev) => resolve(c, true, ev.currentTarget), text: "Pass" }),
+          h("button", { type: "button", class: "danger", onclick: (ev) => resolve(c, false, ev.currentTarget), text: "Fail" }))
+      : h("span", { class: `badge ${c.result === "failed" ? "revoked" : c.result === "passed" ? "trusted" : "pending"}`, text: c.result ?? "open" }))));
+}
+
+async function drawSample(ev) {
+  ev.preventDefault();
+  const rate = Number($("sample-rate").value);
+  const res = await api("/spot-checks/sample", { method: "POST", body: { rate, include_pending: $("sample-pending").checked } });
+  const m = $("spot-msg");
+  m.className = `msg ${res.ok ? "ok" : "err"}`;
+  const skipped = Number(res.headers.get("X-Spot-Checks-Skipped") || 0);
+  m.textContent = res.ok
+    ? `Drew ${res.data.length} check${res.data.length === 1 ? "" : "s"}${skipped ? `; ${skipped} skipped (no independent validator)` : ""}.`
+    : detailOf(res);
+  await refresh();
 }
 
 function renderAudit() {
@@ -638,6 +748,7 @@ function boot() {
   });
   $("signout-btn").addEventListener("click", signOut);
   $("register-form").addEventListener("submit", register);
+  $("sample-form").addEventListener("submit", drawSample);
   $("gw-form").addEventListener("submit", (ev) => {
     ev.preventDefault();
     state.gateways = $("gw-urls").value.split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
@@ -650,6 +761,7 @@ function boot() {
   renderWhoami();
   renderGraph();
   renderAudit();
+  renderSpot();
   renderProbes();
   if (state.token) signIn(state.token);
 

@@ -29,6 +29,7 @@ class AgentTrustOut(AgentOut):
     revocation_votes: int
     revocation_quorum: int
     endorsed_by: list[str]
+    needs_independent: bool = False  # soft lineage guard: quorum met only by the agent's own lineage
 
 
 class EndorsementOut(BaseModel):
@@ -66,6 +67,7 @@ class GraphNode(BaseModel):
     label: str
     status: AgentStatus | None = None  # agents only: live trust decision, same as the gateway's
     active: bool | None = None  # validators only
+    agent_id: str | None = None  # validators only: the agent it was promoted from (None = seeded)
 
 
 class GraphEdge(BaseModel):

@@ -147,3 +147,74 @@ def test_promoted_validator_never_audits_its_own_lineage():
         for c in _sample(client):
             if c["agent_id"] == child["id"]:
                 assert c["validator_id"] != v["id"]
+
+
+def test_include_pending_samples_unendorsed_agents_but_never_revoked_ones():
+    client, tokens = _setup()
+    t = _trusted(client, tokens, "trusted")
+    p = register(client, "pending")
+    gone = register(client, "gone")
+    revoke(client, gone["id"], tokens["validator-a"])
+    revoke(client, gone["id"], tokens["validator-b"])
+    r = client.post("/spot-checks/sample", json={"rate": 1, "include_pending": True}, headers=ADMIN)
+    assert sorted(c["agent_id"] for c in r.json()) == sorted([t["id"], p["id"]])
+
+
+def test_skipped_count_is_reported_in_a_header():
+    client, tokens = _setup()
+    _trusted(client, tokens, "all", by=("validator-a", "validator-b", "validator-c"))
+    _trusted(client, tokens, "two")
+    r = client.post("/spot-checks/sample", json={"rate": 1}, headers=ADMIN)
+    assert len(r.json()) == 1 and r.headers["X-Spot-Checks-Skipped"] == "1"
+
+
+def test_agent_ids_restricts_the_frame():
+    client, tokens = _setup()
+    a = _trusted(client, tokens, "a")
+    _trusted(client, tokens, "b")
+    r = client.post("/spot-checks/sample", json={"rate": 1, "agent_ids": [a["id"]]}, headers=ADMIN)
+    assert [c["agent_id"] for c in r.json()] == [a["id"]]
+
+
+def test_failure_escalates_to_a_second_validator_and_confirmation_revokes():
+    client, tokens = _setup()
+    a = _trusted(client, tokens, "a")
+    (check,) = _sample(client)
+    r = _result(client, check, tokens, passed=False).json()
+    assert r["agent_status"] == "trusted"  # one vote: not revoked yet
+    conf = r["confirmation"]
+    assert conf and conf["confirms_id"] == check["id"] and conf["validator_id"] != check["validator_id"]
+    # confirmers may be endorsers (a or b here): confirming a failure is against their interest
+    assert conf["validator_id"] in ("validator-a", "validator-b")
+    assert _result(client, conf, tokens, passed=False, who="validator-c").status_code == 403  # not assigned
+    r2 = _result(client, conf, tokens, passed=False).json()
+    assert r2["agent_status"] == "revoked" and r2["confirmation"] is None
+    assert access(client, a["token"]).status_code == 403
+
+
+def test_disputed_confirmation_casts_no_vote_and_never_escalates_again():
+    client, tokens = _setup()
+    _trusted(client, tokens, "a")
+    (check,) = _sample(client)
+    conf = _result(client, check, tokens, passed=False).json()["confirmation"]
+    r = _result(client, conf, tokens, passed=True).json()
+    assert r["agent_status"] == "trusted" and r["confirmation"] is None
+    # and a failed confirmation can't spawn a third check either
+    client2, tokens2 = _setup(seed=1)
+    _trusted(client2, tokens2, "b")
+    (c1,) = _sample(client2)
+    c2 = _result(client2, c1, tokens2, passed=False).json()["confirmation"]
+    assert _result(client2, c2, tokens2, passed=False).json()["confirmation"] is None
+
+
+def test_escalation_can_be_disabled():
+    app = create_app("sqlite://", admin_token="admin-secret", spot_check_rng=random.Random(0),
+                     spot_check_escalation=False)
+    with app.state.sessionmaker() as s:
+        tokens = seed_validators(s)
+        s.commit()
+    client = TestClient(app)
+    _trusted(client, tokens, "a")
+    (check,) = _sample(client)
+    r = _result(client, check, tokens, passed=False).json()
+    assert r["confirmation"] is None and r["agent_status"] == "trusted"

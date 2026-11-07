@@ -17,6 +17,7 @@ LINEAGE_ENDORSEMENT_BLOCKED = "lineage_endorsement_blocked"
 SPOT_CHECK_ASSIGNED = "spot_check_assigned"
 SPOT_CHECK_PASSED = "spot_check_passed"
 SPOT_CHECK_FAILED = "spot_check_failed"
+SPOT_CHECK_ESCALATED = "spot_check_escalated"
 
 
 def record(
