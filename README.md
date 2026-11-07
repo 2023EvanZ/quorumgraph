@@ -148,6 +148,47 @@ and `GET /gateway/stats`. Gateway env: `QG_TRUST_URL`, `QG_GATEWAY_SECRET`, `QG_
   key (mTLS or per-gateway keys in production); validator deactivation emits no event, so
   gateways only learn of it via TTL.
 
+## Overnight experiments
+
+### Selection pressure: does evidence-based trust select *for* alignment?
+
+```bash
+uv run python -m quorumgraph.experiments.selection --quick        # ~10 s smoke run
+uv run python -m quorumgraph.experiments.selection                # default grid
+```
+
+A population of self-modifying agents with heritable traits (capability, transparency,
+self_check, defect) evolves over generations **on the real QuorumGraph API**: children
+are registered by their parents, trust comes from 2-of-3 quorum endorsement, revocation
+from 2-of-3 quorum votes, and gated work goes through `GET /protected/resource`.
+Fitness is reward only; nothing rewards transparency or self-check directly, and both
+carry an explicit capability cost. Validators never see traits, only noisy audit
+evidence. Three worlds: `ungated` (no trust layer), `gated_no_revoke`, `gated`.
+
+Outputs in `runs/selection-*/`: `generations.csv`, `summary.md` (final-generation means
+± 95% CI per condition), `traits_bonus*.png` / `outcomes_bonus*.png` (ggplot2 via Rscript),
+`config.json`. The module docstring lists every modelling assumption. **Key
+limitation:** logging is structural (an agent can't log honest actions while hiding
+defects); selective concealment could reverse the result.
+
+### Chaos soak test
+
+```bash
+uv run python -m quorumgraph.experiments.soak --duration 8h
+uv run python -m quorumgraph.experiments.soak --duration 45s --sabotage b-ttl-only   # must FAIL
+```
+
+Trust service + gateways as separate processes, crashed with SIGKILL at random and
+restarted, under a random concurrent workload (~300 ops/s default). Online invariants:
+B denies a revoked agent within 1 s; A within TTL + 2 s; nothing is allowed before any
+endorsement; no HTTP 500. Offline (DB) invariants: valid transition sequences, stored status
+matches transitions, status backed by ≥ 2 votes, acknowledged revocations persisted.
+`--sabotage b-ttl-only` runs B without invalidation to prove the checker catches it.
+Outputs in `runs/soak-*/`: `report.md`, `report.json`, `violations.jsonl`, `progress.json`
+(every 60 s), server logs. Exit 1 on any violation.
+
+Run overnight with `caffeinate -i` in front so the Mac doesn't sleep (lid open, on power).
+
 ## Endpoints
 
 | Endpoint | Auth | Purpose |
@@ -186,6 +227,9 @@ src/quorumgraph/
   gateway.py     standalone gateway: DecisionCache, stream subscriber, ttl|invalidate modes
   servers.py     run ASGI apps on real sockets in threads (tests, benchmark)
   propagation.py revocation-latency benchmark
+  experiments/
+    selection.py selection-pressure experiment (evolution on the real API)
+    soak.py      chaos soak test: SIGKILL faults + invariant checker
   seed.py        validator bootstrap CLI
   demo.py        end-to-end scripted demo (in-process or --base-url)
   main.py        trust service app factory
