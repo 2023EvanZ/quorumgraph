@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QuorumGraph</title>
+  <link rel="stylesheet" href="/dashboard/static/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="12" r="3"/><path d="M7.3 7 16.3 11M7.3 17 16.3 13"/></svg>
+      <span>QuorumGraph</span>
+      <span class="sub">operator dashboard</span>
+    </div>
+    <form id="signin" class="signin" autocomplete="off">
+      <span id="whoami" class="pill">signed out</span>
+      <input id="token" type="password" placeholder="validator or admin token" aria-label="Operator token">
+      <button type="submit" id="signin-btn">Sign in</button>
+      <button type="button" id="signout-btn" class="ghost" hidden>Sign out</button>
+    </form>
+  </header>
+  <p id="banner" class="banner" hidden></p>
+
+  <main class="layout">
+    <div class="col col-main">
+      <section class="card">
+        <div class="card-head">
+          <h2>Trust graph</h2>
+          <ul class="legend" aria-label="Legend">
+            <li><span class="sw sw-trusted"></span>trusted</li>
+            <li><span class="sw sw-pending"></span>pending</li>
+            <li><span class="sw sw-revoked"></span>revoked</li>
+            <li><span class="ln ln-endorse"></span>endorsement</li>
+            <li><span class="ln ln-inactive"></span>doesn't count</li>
+            <li><span class="ln ln-revoke"></span>revocation vote</li>
+            <li><span class="ln ln-lineage"></span>spawned</li>
+          </ul>
+        </div>
+        <div class="graph-wrap">
+          <svg id="graph" role="group" aria-label="Trust graph"></svg>
+          <p id="graph-empty" class="empty">Sign in with a validator or admin token to load the graph.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Gateways</h2>
+          <form id="gw-form" class="inline-form">
+            <input id="gw-urls" aria-label="Gateway URLs (comma-separated)" spellcheck="false">
+            <button type="submit" class="ghost">Apply</button>
+          </form>
+        </div>
+        <div id="gateways" class="gw-grid"></div>
+        <h3>Live probes <span class="hint">each gateway is called with each agent's token; agents you register here</span></h3>
+        <div id="probes"><p class="empty">Register an agent from this dashboard to probe it through the gateways.</p></div>
+      </section>
+    </div>
+
+    <div class="col col-side">
+      <section class="card">
+        <h2>Inspector</h2>
+        <div id="inspector"><p class="empty">Select an agent in the graph to see why it is or isn't trusted.</p></div>
+      </section>
+
+      <section class="card">
+        <h2>Register agent</h2>
+        <form id="register-form" class="stack">
+          <label>Name <input id="reg-name" required maxlength="100" placeholder="e.g. Alpha"></label>
+          <label>Parent <select id="reg-parent"><option value="">none (root agent)</option></select></label>
+          <button type="submit">Register</button>
+          <p id="register-msg" class="msg" role="status"></p>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Audit log</h2>
+        <ol id="audit" class="audit"><li class="empty">—</li></ol>
+      </section>
+    </div>
+  </main>
+
+  <script src="/dashboard/static/dashboard.js"></script>
+</body>
+</html>
