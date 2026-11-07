@@ -1,6 +1,6 @@
 """Selection experiment harness: correctness of the plumbing, not of the result."""
 
-from quorumgraph.experiments.selection import Agent, Config, World, run_one
+from quorumgraph.experiments.selection import WORLDS, Agent, Config, World, run_one
 
 SMALL = dict(pop_size=8, generations=3)
 
@@ -16,7 +16,7 @@ def test_same_seed_is_reproducible():
 
 
 def test_every_world_runs_and_reports_all_generations():
-    for world in ("ungated", "gated_no_revoke", "gated"):
+    for world in WORLDS:
         rows = run_one(Config(world=world, seed=1, **SMALL))
         assert [r["generation"] for r in rows] == [0, 1, 2]
         assert all(r["population"] == 8 for r in rows)
@@ -51,3 +51,28 @@ def test_revocation_is_enforced_by_the_api_and_ends_the_lineage():
     assert a.revoked and a.denied == 1  # the gateway (not this script) cut it off
     child = Agent(genome=dict(a.genome), root=0)
     assert w.register(child, a) is False  # API refuses: revoked agents can't reproduce
+
+
+def test_revoke_only_has_no_gate_but_revokes_through_the_api():
+    w = World(Config(world="revoke_only", seed=2, work_tasks=10, validator_attention=1.0, transparency_cost=0.0))
+    a = Agent(genome={"capability": 1.0, "transparency": 1.0, "self_check": 0.0, "defect": 0.0}, root=0)
+    w.register(a, None)
+    w.work(a)  # no probation, no endorsements: full reward anyway
+    assert a.trusted is False and a.fitness == 10 * w.cfg.gated_reward
+    a.genome["defect"] = 1.0
+    w.work(a)
+    assert a.revoked and a.denied == 1
+    status = w.client.get(f"/agents/{a.id}", headers=w.v["validator-a"]).json()["status"]
+    assert status == "revoked"  # the API's quorum did it, not a flag in this script
+    assert w.register(Agent(genome=dict(a.genome), root=0), a) is False
+
+
+def test_revoke_only_never_endorses():
+    w = World(Config(world="revoke_only", seed=4, **SMALL))
+    paths = []
+    orig = w._post
+    w._post = lambda path, **kw: (paths.append(path), orig(path, **kw))[1]
+    rows = w.run()
+    assert not any(p.endswith("/endorse") for p in paths)  # the gate is genuinely absent
+    assert any(p.endswith("/revoke-vote") for p in paths)
+    assert all(r["frac_trusted"] == 1.0 for r in rows)

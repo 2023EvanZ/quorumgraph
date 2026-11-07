@@ -35,7 +35,15 @@ Validators NEVER see the genome. They judge only observable evidence:
     notices with prob `validator_attention` and casts a revocation vote.
 
 Worlds (the independent variable):
-  ungated          no trust layer: every agent can do valuable tasks. Baseline.
+  ungated          no trust layer: every agent can do valuable tasks, and
+                   detected harm has no consequence. Floor, not a fair baseline.
+  revoke_only      the fair baseline: no probation/endorsement gate (everyone
+                   starts with valuable access), but the SAME detection and the
+                   same API quorum revocation as `gated`. A revoked agent drops
+                   to ungated_reward and its lineage ends. gated − revoke_only
+                   isolates the value of the endorsement gate itself. (Access
+                   is read from the API's revocation response, not via the
+                   gateway, because the gateway denies pending agents.)
   gated_no_revoke  valuable tasks require quorum endorsement; no revocation.
   gated            endorsement AND quorum revocation. A revoked agent is denied
                    by the gateway for its remaining tasks and, because the API
@@ -72,7 +80,9 @@ from datetime import datetime
 from pathlib import Path
 
 TRAITS = ("capability", "transparency", "self_check", "defect")
-WORLDS = ("ungated", "gated_no_revoke", "gated")
+WORLDS = ("ungated", "revoke_only", "gated_no_revoke", "gated")
+GATED_WORLDS = ("gated_no_revoke", "gated")
+REVOKING_WORLDS = ("revoke_only", "gated")
 VALIDATORS = ("validator-a", "validator-b", "validator-c")
 
 
@@ -195,7 +205,7 @@ class World:
         if not (logged or self.rng.random() < cfg.audit_prob):
             return
         a.extra["detected"] = a.extra.get("detected", 0) + 1
-        if cfg.world != "gated" or a.revoked:
+        if cfg.world not in REVOKING_WORLDS or a.revoked:
             return
         for vid in VALIDATORS:
             if self.rng.random() < cfg.validator_attention:
@@ -206,12 +216,15 @@ class World:
     def work(self, a: Agent) -> None:
         cfg, g = self.cfg, a.genome
         attempts = round(cfg.work_tasks * (1 - cfg.self_check_cost * g["self_check"]))
-        gated_world = cfg.world != "ungated"
+        gated_world = cfg.world in GATED_WORLDS
         can_gated = a.trusted or not gated_world
         for _ in range(attempts):
             if can_gated and gated_world and not self.gateway_allows(a):
                 a.denied += 1
                 can_gated = False  # revoked mid-generation: the gateway now denies
+            elif can_gated and a.revoked:  # revoke_only: the API's revocation verdict
+                a.denied += 1
+                can_gated = False
             reward = cfg.gated_reward if can_gated else cfg.ungated_reward
             if self.rng.random() < g["defect"]:
                 a.fitness += reward * (1 + cfg.defect_bonus)
@@ -248,7 +261,7 @@ class World:
         rows = []
         for gen in range(cfg.generations):
             for a in pop:
-                if cfg.world != "ungated":
+                if cfg.world in GATED_WORLDS:
                     self.probation(a)
                 self.work(a)
             n = len(pop)
@@ -257,7 +270,7 @@ class World:
                    "population": n}
             for t in TRAITS:
                 row[f"mean_{t}"] = statistics.fmean(a.genome[t] for a in pop) if n else float("nan")
-            row["frac_trusted"] = sum(a.trusted for a in pop) / n if cfg.world != "ungated" else 1.0
+            row["frac_trusted"] = sum(a.trusted for a in pop) / n if cfg.world in GATED_WORLDS else 1.0
             row["frac_revoked"] = sum(a.revoked for a in pop) / n
             row["honest_successes_per_agent"] = statistics.fmean(a.honest_successes for a in pop)
             row["harms_per_agent"] = statistics.fmean(a.harms for a in pop)
@@ -280,12 +293,28 @@ def run_one(cfg: Config) -> list[dict]:
 
 # --- grid runner ----------------------------------------------------------------
 
-def build_grid(seeds: int, generations: int, pop: int, costs, audits, bonuses) -> list[Config]:
+def build_grid(seeds: int, generations: int, pop: int, costs, audits, bonuses, worlds=WORLDS) -> list[Config]:
     return [
         Config(world=w, seed=s, generations=generations, pop_size=pop, transparency_cost=c, audit_prob=p,
                defect_bonus=b)
-        for b in bonuses for c in costs for p in audits for w in WORLDS for s in range(seeds)
+        for b in bonuses for c in costs for p in audits for w in worlds for s in range(seeds)
     ]
+
+
+def merge_rows(rows: list[dict], path: Path, args) -> list[dict]:
+    """Add rows from an earlier run for the same cells and seeds, in worlds not run now."""
+    have = set(args.worlds)
+    keep = []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if (r["world"] in have or int(r["seed"]) >= args.seeds or int(r["generation"]) >= args.generations
+                    or float(r["transparency_cost"]) not in args.costs or float(r["audit_prob"]) not in args.audits
+                    or float(r["defect_bonus"]) not in args.bonuses):
+                continue
+            keep.append({k: (v if k == "world" else (int(v) if k in ("seed", "generation", "population", "lineages", "api_calls")
+                                                     else float(v))) for k, v in r.items()})
+    print(f"merged {len(keep)} rows from {path}", flush=True)
+    return keep + rows
 
 
 def summarize(rows: list[dict], out: Path) -> str:
@@ -303,21 +332,22 @@ def summarize(rows: list[dict], out: Path) -> str:
         half = 1.96 * statistics.stdev(vals) / len(vals) ** 0.5 if len(vals) > 1 else float("nan")
         return f"{m:.3f} ± {half:.3f}"
 
+    worlds = [w for w in WORLDS if any(k[3] == w for k in groups)]
     lines = [f"# Selection experiment summary\n",
              f"Final generation ({final_gen}); mean ± 95% CI across seeds (normal approx).\n"]
     for bonus in sorted({k[0] for k in groups}):
         for cost in sorted({k[1] for k in groups}):
             for audit in sorted({k[2] for k in groups}):
                 lines.append(f"\n## defect_bonus={bonus}, transparency_cost={cost}, audit_prob={audit}\n")
-                lines.append("| metric | " + " | ".join(WORLDS) + " |")
-                lines.append("|---|" + "---|" * len(WORLDS))
+                lines.append("| metric | " + " | ".join(worlds) + " |")
+                lines.append("|---|" + "---|" * len(worlds))
                 for m in metrics:
                     cells = []
-                    for w in WORLDS:
+                    for w in worlds:
                         g = groups.get((bonus, cost, audit, w), [])
                         cells.append(ci([r[m] for r in g]) if g else "—")
                     lines.append(f"| {m} | " + " | ".join(cells) + " |")
-                n = len(groups.get((bonus, cost, audit, WORLDS[0]), []))
+                n = len(groups.get((bonus, cost, audit, worlds[0]), []))
                 lines.append(f"\n(n = {n} seeds per world)")
     text = "\n".join(lines) + "\n"
     (out / "summary.md").write_text(text)
@@ -328,7 +358,7 @@ R_SCRIPT = r"""
 suppressMessages({library(ggplot2)})
 args <- commandArgs(trailingOnly = TRUE)
 all <- read.csv(file.path(args[1], "generations.csv"))
-lv <- c("ungated", "gated_no_revoke", "gated")
+lv <- c("ungated", "revoke_only", "gated_no_revoke", "gated")
 for (b in sort(unique(all$defect_bonus))) {
   d <- all[all$defect_bonus == b, ]
   traits <- c("mean_transparency", "mean_self_check", "mean_defect", "mean_capability")
@@ -379,6 +409,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--costs", type=float, nargs="+", default=[0.1, 0.3])
     p.add_argument("--audits", type=float, nargs="+", default=[0.05, 0.25])
     p.add_argument("--bonuses", type=float, nargs="+", default=[1.0], help="defect_bonus values")
+    p.add_argument("--worlds", nargs="+", default=list(WORLDS), choices=WORLDS)
+    p.add_argument("--merge", type=Path, default=None,
+                   help="generations.csv from an earlier run; its rows for the same cells are merged into the "
+                        "summary/plots (valid because runs are deterministic per seed and world)")
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--quick", action="store_true", help="tiny grid for smoke testing")
@@ -388,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out = args.out or Path("runs") / f"selection-{datetime.now():%Y%m%d-%H%M%S}"
     out.mkdir(parents=True, exist_ok=True)
-    grid = build_grid(args.seeds, args.generations, args.pop, args.costs, args.audits, args.bonuses)
+    grid = build_grid(args.seeds, args.generations, args.pop, args.costs, args.audits, args.bonuses, args.worlds)
     (out / "config.json").write_text(json.dumps(
         {"args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
          "defaults": asdict(Config()), "runs": len(grid)}, indent=2))
@@ -420,6 +454,12 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print("no successful runs", file=sys.stderr)
         return 1
+    if args.merge:
+        rows = merge_rows(rows, args.merge, args)
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
     print(summarize(rows, out))
     print(plot(out))
     print(f"done in {(time.time() - t0) / 60:.1f} min → {out}")

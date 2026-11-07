@@ -163,7 +163,34 @@ are registered by their parents, trust comes from 2-of-3 quorum endorsement, rev
 from 2-of-3 quorum votes, and gated work goes through `GET /protected/resource`.
 Fitness is reward only; nothing rewards transparency or self-check directly, and both
 carry an explicit capability cost. Validators never see traits, only noisy audit
-evidence. Three worlds: `ungated` (no trust layer), `gated_no_revoke`, `gated`.
+evidence. Four worlds:
+
+| world | endorsement gate | revocation | isolates |
+|---|---|---|---|
+| `ungated` | no | no | floor: harm has no consequence |
+| `revoke_only` | no | yes (API quorum) | fair baseline: punish detected harm, no gate |
+| `gated_no_revoke` | yes | no | |
+| `gated` | yes | yes | full system |
+
+`--worlds` runs a subset; `--merge <generations.csv>` merges an earlier run's rows for the
+same cells (valid because runs are deterministic per seed, verified bit-for-bit).
+
+**Results** (60 generations, pop 40, 50 seeds/cell, defect bonus 1.0; full tables in
+`runs/selection-overnight/` and `runs/selection-baseline/`, which are gitignored):
+
+- *Punishment alone selects for opacity.* In `revoke_only`, revocation is triggered by
+  logged evidence, so transparency collapses to ~0.04–0.2 in every cell. With no audits
+  it is barely better than `ungated` (defect 0.84–0.87 vs ~0.90).
+- *The gate is what makes being observable pay.* Access requires being seen, so `gated`
+  keeps transparency at 0.56–0.89 and has the lowest mean harms in all 9 cells (CIs overlap
+  `gated_no_revoke` when audit = 0). Against the fair
+  baseline at audit 0.25, harms are about half (0.29–0.31 vs 0.53–0.62 per agent).
+- *The tax is real.* At transparency cost 0.5 / audit 0.25, `revoke_only` produces more
+  honest output (7.7 vs 5.1) by staying opaque and relying on audits; at cost 0.1 they're
+  close (7.9 vs 7.6). The gate buys half the harm and auditability at a capability price.
+- *Revocation without audits can backfire* (cost 0.5, audit 0: `gated` transparency 0.56
+  vs 0.73 in `gated_no_revoke`) because it punishes visibility, not defection. A 5% audit
+  rate mostly fixes it.
 
 Outputs in `runs/selection-*/`: `generations.csv`, `summary.md` (final-generation means
 ± 95% CI per condition), `traits_bonus*.png` / `outcomes_bonus*.png` (ggplot2 via Rscript),
