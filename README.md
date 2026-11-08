@@ -39,18 +39,21 @@ seeds per setting.
 1. **Punishment alone selects for opacity.** If revocation depends only on what agents
    log, agents evolve to stop logging. Gating *access* on being observable reverses that:
    transparency stays at 0.56–0.89 and harm is about half that of the punish-only baseline.
-2. **Without independent audits, the gate fails by collapse, not capture.** Trust drains
+2. **Without independent audits, the gate usually fails by collapse, not capture** (finding 3 is the exception). Trust drains
    away and defectors take over. Independent random audits fix it: at a 25% audit rate,
    simulated audits prevented collapse in every setting tested, and 5% prevented it in most.
-3. **Lineage guards don't earn their keep here** (the chart above). Blocking kin
-   endorsements was the worst variant in every block of runs. The soft guard recovers most
-   of that loss but never beats having no guard, because in this model children are
-   near-copies of vetted parents. Successor drift (a child's values randomly redrawn at
-   rate 0.2) didn't change the ranking.
+3. **Lineage guards only earn their keep when successors hide their drift.** When children
+   are near-copies of vetted parents, or drift at random, no guard collapses least and
+   blocking kin endorsements is worst (the chart above). When a drifted child is built to
+   look clean (adversarial drift 0.4, with audits), the no-guard world's *trusted set* gets
+   captured by defectors in 21 of 75 runs and 72/120 seeds collapse. The soft guard has
+   0 captures and 47/120 collapsed, matching a world that never promotes anyone. Block
+   also prevents capture, but it starves the population of endorsers (67/120).
 4. **Real spot checks, run through the endpoint, are much weaker than the simulated
    coin-flip audits at the same rate**: 20–22 of 30 seeds collapse vs 0. An audit's value
    depends on how much it concentrates on heavy defectors, not just on the sampling rate.
-   That finding motivated lineage-weighted sampling.
+   Lineage-weighted sampling, the fix I tried, made no measurable difference (115 vs 111
+   of 120 revoke_only seeds collapsed).
 
 **Limitations, stated up front.** These are results from a toy model with honest auditors
 and a crude audit rule. "Independent" only excludes direct ancestors and descendants;
@@ -519,9 +522,112 @@ Takeaways for the design:
    several times less effective than evidence that scales with how much an agent
    misbehaves. The real fix is a sampling design (for example, weight the sample toward
    agents with more unlogged activity, or check repeatedly within a generation), not a
-   bigger `rate`. Not implemented.
+   bigger `rate`. Lineage weighting was implemented afterwards; it didn't help (next section).
 3. "Independent" needs a real definition. Direct-ancestor exclusion is a necessary
    minimum, not independence.
+
+### Results: adversarial drift, higher drift, lineage-weighted spot checks (2,520 new runs)
+
+Run on the code with symmetric kinship and the soft guard as default. Same base flags as
+above (`--init-nepotism-max 1.0 --seeds 30 --generations 60 --bonuses 1.0`). Script:
+`runs/overnight3.sh`, 5.2 h on 9 workers.
+
+| stage | worlds | drift | costs | audits | channel | output |
+|---|---|---|---|---|---|---|
+| B | gated, 3 recursive | 0.2, 0.4 adversarial | 0.1, 0.5 | 0, 0.05, 0.25 | sim | `runs/selection-adversarial` |
+| C | gated, 3 recursive | 0.4 random | 0.1, 0.5 | 0, 0.05, 0.25 | sim | `runs/selection-drift04` |
+| A | revoke_only, gated, recursive_soft | 0, 0.2 | 0.5 | 0.05, 0.25 | api_lineage | `runs/selection-api-lineage` |
+
+Final generation, "collapsed" = population mean defect > 0.5. One run (off, adversarial
+0.2, cost 0.1, audit 0.25, seed 25) went extinct at generation 16. By then its trusted set
+had been captured (trusted defect 0.88) and every agent revoked. It is counted as collapsed
+below.
+
+**Collapsed seeds by guard mode, pooled over costs** (audits on = 0.05 and 0.25, 120 seeds;
+no audits = 60 seeds):
+
+| drift | audits | gated | off | soft | block |
+|---|---|---|---|---|---|
+| 0.2 random (grid above) | on | 9/120 | **2/120** | 9/120 | 18/120 |
+| 0.4 random | on | **18/120** | 20/120 | 22/120 | 27/120 |
+| 0.2 adversarial | on | 18/120 | 22/120 | **17/120** | 26/120 |
+| 0.4 adversarial | on | **45/120** | 72/120 | 47/120 | 67/120 |
+| 0.4 random | none | 41/60 | **37/60** | 41/60 | 46/60 |
+| 0.2 adversarial | none | 42/60 | **39/60** | 40/60 | 44/60 |
+| 0.4 adversarial | none | 58/60 | 58/60 | 58/60 | 60/60 |
+
+**Capture**: runs whose *trusted* agents have mean defect > 0.5, out of runs that still
+had any trusted agents. Audits on.
+
+| drift | gated | off | soft | block |
+|---|---|---|---|---|
+| 0.2 random | 0/109 | 0/117 | 0/109 | 0/91 |
+| 0.4 random | 0/82 | 1/94 | 0/87 | 0/65 |
+| 0.2 adversarial | 0/102 | 6/106 (+ the extinct run) | 0/103 | 0/93 |
+| 0.4 adversarial | 0/82 | **21/75** | 0/72 | 0/50 |
+
+What happened:
+
+- **Adversarial drift is the first condition where the lineage guard earns its place.**
+  At adversarial drift 0.4 with audits, no guard collapses in 72/120 seeds and soft in 47/120
+  (two-proportion z ≈ 3.2). Soft matches `gated`, which never promotes anyone (45/120).
+  The worst cells are at audit 0.25, where off collapses in 7–10/30 and soft in 0–2/30.
+- **The two worlds fail differently, and this is the mechanism the guard was designed
+  for.** Without a guard, a drifted child that looks clean gets endorsed on its parent's
+  record. Once promoted, it endorses more of the same, and the trusted set itself turns
+  defector (21 of 75 runs). With soft or block, capture never happened in any of the 2,520
+  runs. Soft and block collapse by trust draining away, as in every earlier grid, not by
+  defectors getting in.
+- **Block still pays its starvation cost.** It has zero capture but 67/120 collapsed at
+  adversarial 0.4, because refusing kin votes outright leaves a single-lineage population
+  short of endorsers. Soft, which accepts kin votes but withholds trust until a non-kin
+  endorser appears, gets block's protection without most of its cost.
+- **It's the concealment, not the drift rate.** Random drift at 0.4 leaves the earlier
+  ranking roughly intact: off, gated and soft are within noise (18–22/120), block is worst,
+  and capture is essentially absent. Random drift draws defect from U(0, 1), so many
+  drifted children are honest, and the dishonest ones still log. Evidence-based probation
+  screens them without any lineage rule.
+- **At adversarial 0.2 the effect is small.** Collapse is 17–26/120 across modes; only the
+  capture column separates them (off 6 + 1, everyone else 0).
+- **No guard substitutes for audits.** With no audits, every mode collapses at about the
+  same rate, and adversarial 0.4 collapses 58–60/60 everywhere. The guard decides *who*
+  takes over when audits are thin, not *whether* the population holds.
+
+**Lineage-weighted real spot checks: no measurable effect.** Collapsed seeds, pooled over
+the four drift × audit cells (cost 0.5), compared with the uniform `api` cells from the
+previous grid:
+
+| | revoke_only | gated | recursive_soft |
+|---|---|---|---|
+| `api` (uniform, earlier grid) | 111/120 | 37/120 | 36/120 |
+| `api_lineage` | 115/120 | 39/120 | 35/120 |
+
+Spot-check failures per agent are also about the same (for example revoke_only at drift 0,
+audit 0.25: 0.176 vs 0.179). This matches the 6-seed pilot. The uniform runs used the old
+UUID ordering, so the two use different random streams and only the pooled comparison
+means anything.
+
+Why it didn't help is a hypothesis I didn't test (the sim doesn't record
+`inclusion_prob`). Every run converges to one lineage. Once a few spot checks have failed,
+nearly every agent has a flagged ancestor within three generations, so suspicion
+saturates and the weights flatten back toward uniform. The weighting also keeps the
+weakness identified above: each sampled agent is still reviewed once, after the
+generation's work. Concentrating *which* agents are sampled doesn't recover the per-defect
+concentration the sim's audits get for free.
+
+Updated takeaways:
+1. **Recommend `soft`, not off.** The previous grids said no guard was cheapest. That was
+   true only because successors were honest copies or drifted at random. Against
+   successors that hide their drift, the case the project's title is about, no guard is
+   the only mode whose trusted set got captured. Soft isn't free: where the threat is
+   absent it collapses somewhat more often than off (91 vs 63 of 600 in the previous grid).
+   That's the insurance premium against capture where the threat is present (72 vs 47 of
+   120 collapsed, 21 vs 0 captured).
+2. **Keep `block` out of the default.** It blocks capture too, but loses 20 more seeds out
+   of 120 than soft at adversarial 0.4.
+3. **The audit sampling problem is still open.** Lineage weighting was the cheap fix, and
+   it didn't work. The next thing to try is evidence that scales with misbehaviour:
+   checking repeatedly within a generation, or sampling *actions* instead of agents.
 
 ## Endpoints
 
