@@ -126,10 +126,30 @@ def kn(k, n, ci=True):
     return f"{k}/{n} \\ci{{{100 * lo:.0f}}}{{{100 * hi:.0f}}}"
 
 
+TESTS: list[tuple[str, float]] = []
+
+
 def test(label, a, b):
     p = fisher(a[0], a[1], b[0], b[1])
     log(f"  TEST {label}: {a[0]}/{a[1]} vs {b[0]}/{b[1]}  Fisher p = {p:.2g}")
+    TESTS.append((label, p))
     return p
+
+
+def holm(tests):
+    """Holm-Bonferroni step-down adjustment over every test in the log (family = all of them)."""
+    order = sorted(range(len(tests)), key=lambda i: tests[i][1])
+    m, adj, running = len(tests), [0.0] * len(tests), 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * tests[i][1]))
+        adj[i] = running
+    return adj
+
+
+def log_holm():
+    log(f"== Holm-adjusted p-values (family = all {len(TESTS)} tests above)")
+    for (label, p), q in sorted(zip(TESTS, holm(TESTS)), key=lambda t: t[0][1]):
+        log(f"  {label}: raw p = {p:.2g}  Holm p = {q:.2g}  {'reject at 0.05' if q < 0.05 else 'n.s.'}")
 
 
 def write(name, body):
@@ -341,6 +361,7 @@ def main():
     t_audit_design(rows, 0.1)
     t_real_adversarial(rows)
     t_audit25(rows)
+    log_holm()
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "numbers.log").write_text("\n".join(LOG) + "\n")
     for name, recs in FIG.items():

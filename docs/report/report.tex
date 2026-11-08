@@ -173,7 +173,8 @@ agent was revoked and the population died out; this happened twice). A seed is
 each seed either keeps a trusted, honest core or loses it entirely, so collapse counts are
 more informative than means. A run is \emph{captured} if the trusted agents' mean defect
 exceeds 0.5 (counted among runs that still have trusted agents). Intervals are Wilson 95\%;
-tests are two-sided Fisher exact. Runs are deterministic per seed, and the simulated-audit
+tests are two-sided Fisher exact, and $p$-values in the text are raw; the Holm-adjusted
+values over all 14 tests reported are in \code{tables/numbers.log}. Runs are deterministic per seed, and the simulated-audit
 channel was verified to reproduce bit-for-bit after every code change (1{,}440 rows).
 
 \section{Results}
@@ -246,7 +247,8 @@ guard, a drifted child that looks clean is endorsed on its parent's record, is p
 endorses more of the same: the trusted set itself turned defector in 21 of 75 runs. With
 either guard, capture never happened in any run (soft 0/72; $p = 2\times10^{-7}$). Block also
 prevents capture but leaves a single-lineage population short of endorsers, so it collapses
-nearly as often as no guard (67/120; soft vs.\ block $p = 0.014$).
+nearly as often as no guard (67/120; soft vs.\ block $p = 0.014$, which does not survive
+Holm correction, adjusted $p = 0.08$).
 
 It is the concealment, not the drift rate: at random drift 0.4 the guards are
 indistinguishable (no guard 20/120 vs.\ soft 22/120, $p = 0.87$) and capture is essentially
@@ -439,9 +441,12 @@ fault-tolerance claim; colluding validators are a stated limitation.
   \item \textbf{Coverage assumption.} Per-action audits work only if every action passes a
   gateway the service can sample. Cached standalone gateways are not covered yet.
   \item \textbf{Statistics.} Seeds are shared across worlds, but trajectories diverge, so
-  tests treat cells as independent. $p$-values are not corrected for the number of
-  comparisons; the main ones are far below any reasonable threshold, the soft-vs.-no-guard
-  difference without adversarial drift ($p = 0.02$) is not. The gate-only pilot had 6 seeds.
+  tests treat cells as independent. After Holm correction over all 14 tests, eight remain
+  significant at 0.05, including every headline comparison (largest adjusted $p = 0.034$, the
+  real-audit collapse difference). Two do not: soft vs.\ no guard without adversarial drift
+  (raw $p = 0.02$, adjusted 0.10) and soft vs.\ block under adversarial drift (raw 0.014,
+  adjusted 0.08). The case for soft over block rests on the benign grid (adjusted
+  $p = 4\times10^{-4}$). The gate-only pilot had 6 seeds.
   \item \textbf{Single machine, in-process API.} The simulation calls the real service
   in-process; latency and concurrency effects are tested separately (soak test), not in the
   evolutionary runs.

@@ -83,3 +83,18 @@
   drift 0.2 random: ungated=60/60  revoke_only=0/60  gated=0/60  recursive=0/60  recursive_soft=0/60  recursive_guarded=0/60
   drift 0.4 adversarial: gated=0/60  recursive=17/60  recursive_soft=2/60  recursive_guarded=12/60
   drift 0.4 random: gated=0/60  recursive=0/60  recursive_soft=0/60  recursive_guarded=2/60
+== Holm-adjusted p-values (family = all 14 tests above)
+  cost 0.5 revoke_only agents vs actions: raw p = 2.7e-27  Holm p = 3.8e-26  reject at 0.05
+  cost 0.1 revoke_only agents vs actions: raw p = 1.5e-26  Holm p = 1.9e-25  reject at 0.05
+  adv 0.4 capture, no guard vs soft: raw p = 2e-07  Holm p = 2.4e-06  reject at 0.05
+  real adv 0.4 capture, no guard vs soft: raw p = 1.4e-05  Holm p = 0.00015  reject at 0.05
+  benign pooled, soft vs block: raw p = 3.6e-05  Holm p = 0.00036  reject at 0.05
+  adv 0.4 collapse, no guard vs gated: raw p = 0.00075  Holm p = 0.0068  reject at 0.05
+  adv 0.4 collapse, no guard vs soft: raw p = 0.0019  Holm p = 0.015  reject at 0.05
+  real adv 0.4 audit 0.25 collapse, no guard vs soft: raw p = 0.0048  Holm p = 0.034  reject at 0.05
+  adv 0.4 collapse, soft vs block: raw p = 0.014  Holm p = 0.083  n.s.
+  benign pooled, no guard vs soft: raw p = 0.02  Holm p = 0.098  n.s.
+  cost 0.5 revoke_only agents vs lineage-weighted: raw p = 0.41  Holm p = 1  n.s.
+  random 0.4 collapse, no guard vs soft: raw p = 0.87  Holm p = 1  n.s.
+  cost 0.1 revoke_only actions vs sim: raw p = 0.88  Holm p = 1  n.s.
+  cost 0.5 revoke_only actions vs sim: raw p = 1  Holm p = 1  n.s.
