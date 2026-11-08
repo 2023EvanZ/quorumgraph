@@ -48,6 +48,14 @@ LINEAGE_GUARD = parse_lineage_guard(os.getenv("QG_LINEAGE_GUARD", "soft").lower(
 # comes from anywhere else.
 SPOT_CHECK_ESCALATION = os.getenv("QG_SPOT_CHECK_ESCALATION", "1") != "0"
 
+# Per-action spot checks: each access the in-process gateway (/protected/resource)
+# allows is audited with this probability, decided by the service at grant time and
+# assigned to an independent validator to review that one action. 0 (default) = off.
+# Unlike POST /spot-checks/sample (a fraction of *agents*, whenever the operator asks),
+# this scales with how much an agent acts. Standalone gateways that cache decisions
+# don't call the trust service per action, so they are not covered.
+ACTION_AUDIT_RATE = float(os.getenv("QG_ACTION_AUDIT_RATE", "0"))
+
 # --- Phase 5: distributed gateways ---------------------------------------------
 
 # Shared secret gateways present to the trust service's /internal endpoints.

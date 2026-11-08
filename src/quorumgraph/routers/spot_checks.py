@@ -12,6 +12,15 @@ that: an opaque agent is as likely to be checked as a transparent one.
     POST /spot-checks/{id}/result      the assigned validator: passed / failed
     GET  /spot-checks                  operator: list, filter by agent or open
 
+Per-action checks (app.state.action_audit_rate > 0): the in-process gateway calls
+assign_action_check() on each access it allows, and with that probability opens a
+check on *that action* (action_event_id = its access_allowed audit event). The
+agent's response is identical either way, so it can't tell which actions are
+reviewed. Why: agent-level sampling reviews a fraction of agents once, whenever the
+operator asks, so a heavy defector is no likelier to be checked than a light one.
+Per-action sampling scales with how much an agent acts, and a failure can revoke
+it mid-stream, before the rest of its gated actions.
+
 Design choices:
 - The *service* draws the sample (app.state.spot_check_rng, SystemRandom by
   default). Neither agents nor validators can pick who is checked.
@@ -67,6 +76,7 @@ class SpotCheckOut(BaseModel):
     agent_id: str
     validator_id: str
     confirms_id: int | None = None
+    action_event_id: int | None = None  # per-action check: the access_allowed event under review
     result: str | None
     notes: str
     created_at: datetime
@@ -123,12 +133,36 @@ def _escalate(session: Session, request: Request, check: SpotCheck, agent: Agent
         audit.record(session, audit.SPOT_CHECK_ESCALATED, actor_id="service", agent_id=agent.id,
                      spot_check_id=check.id, validator_id=None, skipped="no second validator")
         return None
-    follow = SpotCheck(agent_id=agent.id, validator_id=confirmer.id, confirms_id=check.id)
+    follow = SpotCheck(agent_id=agent.id, validator_id=confirmer.id, confirms_id=check.id,
+                       action_event_id=check.action_event_id)  # the confirmer reviews the same action
     session.add(follow)
     session.flush()
     audit.record(session, audit.SPOT_CHECK_ESCALATED, actor_id="service", agent_id=agent.id,
                  spot_check_id=check.id, confirmation_id=follow.id, validator_id=confirmer.id)
     return follow
+
+
+def assign_action_check(session: Session, request: Request, agent: Agent, action_event_id: int) -> SpotCheck | None:
+    """Called by the gateway for each allowed access. With prob action_audit_rate, open
+    a check on that action, assigned like any other (independent of endorsers and kin).
+    The caller commits, in the same transaction as the access_allowed event."""
+    rate = request.app.state.action_audit_rate
+    if rate <= 0:
+        return None
+    rng = request.app.state.spot_check_rng
+    if rng.random() >= rate:
+        return None
+    auditor = _pick_auditor(session, agent, rng)
+    if auditor is None:
+        audit.record(session, audit.SPOT_CHECK_ASSIGNED, actor_id="service", agent_id=agent.id,
+                     validator_id=None, action_event_id=action_event_id, skipped="no independent validator")
+        return None
+    check = SpotCheck(agent_id=agent.id, validator_id=auditor.id, action_event_id=action_event_id)
+    session.add(check)
+    session.flush()
+    audit.record(session, audit.SPOT_CHECK_ASSIGNED, actor_id="service", agent_id=agent.id,
+                 validator_id=auditor.id, spot_check_id=check.id, action_event_id=action_event_id)
+    return check
 
 
 def _suspicion(session: Session, agents: list[Agent]) -> dict[str, float]:

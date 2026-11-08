@@ -27,6 +27,7 @@ def create_app(
     lineage_guard: bool | str | None = None,
     spot_check_rng: random.Random | None = None,
     spot_check_escalation: bool | None = None,
+    action_audit_rate: float | None = None,
 ) -> FastAPI:
     engine = make_engine(database_url or config.DATABASE_URL)
     Base.metadata.create_all(engine)  # MVP: no migrations; delete the .db file to reset
@@ -44,6 +45,10 @@ def create_app(
     app.state.spot_check_rng = spot_check_rng or secrets.SystemRandom()
     app.state.spot_check_escalation = (config.SPOT_CHECK_ESCALATION if spot_check_escalation is None
                                        else spot_check_escalation)
+    rate = config.ACTION_AUDIT_RATE if action_audit_rate is None else action_audit_rate
+    if not 0 <= rate <= 1:
+        raise ValueError(f"action audit rate must be in [0, 1], got {rate}")
+    app.state.action_audit_rate = rate
     app.state.lineage_guard = guard  # "off" | "block" | "soft"
     app.state.event_poll_interval = (
         event_poll_interval if event_poll_interval is not None else config.EVENT_POLL_INTERVAL
@@ -63,6 +68,7 @@ def create_app(
 _ADDED_COLUMNS = [  # (table, column, DDL) — nullable additions since the first release
     ("validators", "agent_id", "VARCHAR(36) REFERENCES agents(id)"),
     ("spot_checks", "confirms_id", "INTEGER REFERENCES spot_checks(id)"),
+    ("spot_checks", "action_event_id", "INTEGER REFERENCES audit_events(id)"),
 ]
 
 

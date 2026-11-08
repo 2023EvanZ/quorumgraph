@@ -12,7 +12,7 @@ can also copy whatever trust it was given. QuorumGraph treats trust as something
 agent **earns, and keeps only while independent observers agree**. Trust never passes
 from parent to child; scrutiny can.
 
-**What's built** (FastAPI + SQLite, 124 tests, `uv run python -m quorumgraph.demo` runs all
+**What's built** (FastAPI + SQLite, 136 tests, `uv run python -m quorumgraph.demo` runs all
 of it with asserted outcomes):
 - **Quorum trust and revocation.** Access needs 2-of-3 validator endorsements, and 2-of-3
   votes revoke it. A revoked agent can't spawn successors, and every decision is in an
@@ -25,8 +25,10 @@ of it with asserted outcomes):
   from the agent itself, its ancestors or its descendants.
 - **Spot checks.** The service draws the sample, so neither agents nor validators choose
   who is checked. The auditor must be independent of the agent, and a failure escalates
-  to a second validator, so no single auditor can revoke alone. Optional lineage
-  weighting checks the successors of flagged agents more often for the same budget.
+  to a second validator, so no single auditor can revoke alone. **Per-action checks**
+  (`QG_ACTION_AUDIT_RATE`) audit a random fraction of the actions the gateway allows,
+  decided at grant time and invisible to the agent. Optional lineage weighting checks the
+  successors of flagged agents more often for the same budget.
 - **An operator dashboard** showing the live trust graph, why each agent is or isn't
   trusted, gateway state, promotions and spot checks.
 
@@ -49,11 +51,17 @@ seeds per setting.
    captured by defectors in 21 of 75 runs and 72/120 seeds collapse. The soft guard has
    0 captures and 47/120 collapsed, matching a world that never promotes anyone. Block
    also prevents capture, but it starves the population of endorsers (67/120).
-4. **Real spot checks, run through the endpoint, are much weaker than the simulated
-   coin-flip audits at the same rate**: 20–22 of 30 seeds collapse vs 0. An audit's value
-   depends on how much it concentrates on heavy defectors, not just on the sampling rate.
-   Lineage-weighted sampling, the fix I tried, made no measurable difference (115 vs 111
-   of 120 revoke_only seeds collapsed).
+
+   ![Collapse and capture under random vs adversarial drift](docs/adversarial_capture.png)
+
+4. **Audit actions, not agents.** Real spot checks that sample *agents* once per generation
+   were far weaker than the simulated per-defect audits: 111 vs 33 of 120 seeds collapsed
+   in the revoke-only world. Sampling *actions* at the gateway, through the real service,
+   closed the gap (32/120), as long as every action, including untrusted agents' low-value
+   work, passes a gateway. Auditing only the trust-gated tier did worse than sampling
+   agents, because only already-vetted agents pass it. Lineage-weighted agent sampling
+   didn't help (115/120). The guard result in finding 3 holds under real per-action
+   audits too (no guard 16/34 captured, soft 0/27).
 
 **Limitations, stated up front.** These are results from a toy model with honest auditors
 and a crude audit rule. "Independent" only excludes direct ancestors and descendants;
@@ -333,18 +341,36 @@ cooperation:
   deployed; the service still draws the sample. The response header
   `X-Spot-Checks-Skipped` counts agents with no independent validator available.
 
+**Per-action spot checks** (`QG_ACTION_AUDIT_RATE`, default 0 = off). Every access the
+in-process gateway allows is audited with this probability, decided by the service when
+it grants access. The check names that one action (`action_event_id`, its
+`access_allowed` audit event) and is assigned, escalated and resolved like any other.
+The agent's response is identical either way, so it can't tell which actions are being
+reviewed. There are two gateway tiers: `GET /protected/resource` (trust-gated) and
+`GET /protected/basic` (any agent that isn't revoked). Both are sampled. Why: agent-level
+sampling reviews a heavy defector no more often than a light one. Per-action sampling
+scales with how much an agent acts, and a failure revokes the agent mid-stream. The basic
+tier exists because a pilot that audited only the trust-gated tier did *worse* than
+agent-level sampling: it reviewed only agents that had already been vetted (trusted mean
+defect 0.02), while the unvetted majority, who also reproduce, went unseen. Not covered:
+standalone gateways that cache decisions (they don't call the trust service per action).
+
 Kinship is symmetric (`trust.is_kin`): a validator promoted from an agent's descendant
 can't endorse it (`block`), doesn't count as independent (`soft`), and is never its auditor
 or confirmer. Until 2026-11-07 only *ancestors* were excluded. In the selection sim the
 difference can't arise: seats are filled from earlier generations, so a seated validator
 never descends from a living agent, and the sim reproduces bit-for-bit across the change.
 
-The selection experiment has three audit channels (`--audit-channel`):
+The selection experiment has five audit channels (`--audit-channel`):
 - `sim` (the default, used for every result above): `audit_prob` is a per-defect coin flip.
 - `api`: after each generation, real `/spot-checks` calls with escalation. The auditor fails
   an agent if it caused any harm that generation.
 - `api_single`: the same without escalation.
 - `api_lineage`: `api` with `weighting: "lineage"` on the sample (below).
+- `api_action`: per-action checks. Every action by an agent that isn't revoked passes a
+  gateway tier, the service samples at `audit_prob`, and the auditor fails the check if
+  *that action* was a defect. Logged defects are audited too, whereas `sim` only flips the
+  coin for unlogged ones.
 
 **Lineage-weighted sampling** (`POST /spot-checks/sample {"weighting": "lineage"}`): the
 expected number of checks stays `rate × n`, but each agent's inclusion probability is
@@ -628,6 +654,69 @@ Updated takeaways:
 3. **The audit sampling problem is still open.** Lineage weighting was the cheap fix, and
    it didn't work. The next thing to try is evidence that scales with misbehaviour:
    checking repeatedly within a generation, or sampling *actions* instead of agents.
+   (Done: per-action checks closed the gap, see the next section.)
+
+### Results: per-action spot checks through the real endpoint (600 new runs)
+
+Channel `api_action` (per-action checks, both gateway tiers, escalation on). Same base
+flags, cost 0.5, 30 seeds. Script: `runs/overnight4.sh`, 4.0 h on 9 workers.
+
+| stage | worlds | drift | audits | output |
+|---|---|---|---|---|
+| A | revoke_only, gated, recursive_soft | 0, 0.2 | 0.05, 0.25 | `runs/selection-api-action` |
+| B | gated, 3 recursive | 0.4 adversarial | 0.05, 0.25 | `runs/selection-api-action-adv` |
+
+**Stage A: collapsed seeds, the same cells under all three audit designs.** The `api` and
+`sim` columns come from the earlier grids.
+
+| world | drift | audit | `api` (agents, once per generation) | `api_action` (actions, at the gateway) | `sim` (actions, coin flip) |
+|---|---|---|---|---|---|
+| revoke_only | 0 | 0.05 | 30/30 | 11/30 | 13/30 |
+| revoke_only | 0 | 0.25 | 22/30 | **0/30** | 0/30 |
+| revoke_only | 0.2 | 0.05 | 29/30 | 21/30 | 20/30 |
+| revoke_only | 0.2 | 0.25 | 30/30 | **0/30** | 0/30 |
+| gated | pooled | both | 37/120 | 5/120 | 7/120 |
+| recursive_soft | pooled | both | 36/120 | 6/120 | 7/120 |
+
+- **The real-endpoint gap was entirely the sampling unit.** Reviewing a random fraction of
+  *actions* at grant time, through the real service with real validators and escalation,
+  reproduces the simulated audits almost cell for cell. That's 32 vs 33 of 120 collapsed
+  for revoke_only, against 111/120 when the same budget samples *agents*. Lineage
+  weighting (115/120) didn't help, because it changed *which agents* were sampled, not
+  *what* was sampled.
+- **Coverage matters as much as the unit.** The first pilot audited only the trust-gated
+  tier and did worse than agent sampling (5/6 seeds collapsed at drift 0.2): trusted agents
+  are already vetted (mean defect 0.02), and the defectors driving collapse were untrusted
+  agents doing ungated work. Every action has to pass a gateway the service can sample.
+  That's a deployment requirement, not a tuning knob.
+- **5% is still not enough without a gate.** revoke_only at audit 0.05 collapses in 11–21
+  of 30 seeds on both action channels. With the endorsement gate it's 0–6 of 30.
+
+**Stage B: adversarial drift 0.4 with real per-action checks.** Collapsed seeds (capture
+in brackets: trusted mean defect > 0.5, out of runs with trusted agents):
+
+| audit | gated | off | soft | block |
+|---|---|---|---|---|
+| 0.05 | 28/30 | 29/30 | 30/30 | 30/30 |
+| 0.25 | **0/30** | 15/30 | 4/30 | 10/30 (+1 extinct) |
+| pooled capture | 0/34 | **16/34** | 0/27 | 0/18 |
+
+The lineage-guard result survives the move to real audits, with the same shape as the sim
+(audit 0.25: off 10/30, soft 2/30, block 8/30). Without a guard, the trusted set is captured
+in about half the runs that still have one. Soft and block are never captured. At audit 0.25
+soft collapses in 4/30 against off's 15/30. At 0.05 every mode collapses: per-action audits
+don't rescue a population whose successors turn bad and hide it 40% of the time at that
+rate. One block run went extinct at generation 32 (population defect 0.66, all revoked) and
+is counted as collapsed.
+
+Updated takeaways:
+1. **Audit actions, not agents, and audit all of them.** Per-action sampling at the
+   gateway is the real-service version of the audit that worked in simulation, and it
+   performs like it. Sample at every privilege tier, including untrusted work.
+2. **Soft guard plus per-action audits at 25% is the best recursive configuration
+   tested.** It collapsed in 0/60 seeds without adversarial drift, and in 4/30 under
+   adversarial drift 0.4, where no guard collapsed in 15/30. Only the no-promotion
+   baseline did better there (0/30). Its price is that the validator pool never grows.
 
 ## Endpoints
 
@@ -638,6 +727,7 @@ Updated takeaways:
 | `POST /agents/{id}/endorse` | validator | Endorse; trusted at quorum |
 | `POST /agents/{id}/revoke-vote` | validator | Vote to revoke (reason required); revoked at quorum, permanently |
 | `GET /protected/resource` | agent | The gateway: 401 bad credential, 403 not trusted/revoked |
+| `GET /protected/basic` | agent | Low-privilege tier: any agent that isn't revoked (403 revoked) |
 | `GET /audit` | validator or admin | Newest-first events; filter by `agent_id`, `event_type`; `limit` ≤ 500 |
 | `GET /graph` | validator or admin | Nodes + endorsement / revocation_vote / lineage edges |
 | `GET /operator/me` | validator or admin | Who the token belongs to (dashboard sign-in) |
@@ -664,7 +754,7 @@ src/quorumgraph/
   routers/
     agents.py    POST /agents, GET /agents/{id}, POST /agents/{id}/endorse
                  POST /agents/{id}/revoke-vote
-    protected.py GET /protected/resource (the gateway)
+    protected.py GET /protected/resource, /protected/basic (the gateway tiers)
     admin.py     GET /audit, GET /graph (operator read access)
     internal.py  /internal/authorize, /internal/events (gateway-facing)
     dashboard.py GET /dashboard + static assets, CSP

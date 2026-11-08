@@ -275,3 +275,107 @@ def test_lineage_weighting_checks_successors_of_flagged_agents_more_often():
     assert lin[child["id"]] > 2 * mean_other(lin)
     assert uni[child["id"]] < 2 * mean_other(uni)
     assert abs(sum(lin.values()) - sum(uni.values())) < 0.25 * sum(uni.values())  # same budget
+
+
+# --- per-action spot checks (gateway-time sampling) ------------------------------
+
+def _setup_action(rate, seed=0):
+    app = create_app("sqlite://", admin_token="admin-secret", spot_check_rng=random.Random(seed),
+                     action_audit_rate=rate)
+    with app.state.sessionmaker() as s:
+        tokens = seed_validators(s)
+        s.commit()
+    return TestClient(app), tokens
+
+
+def _open_checks(client, agent_id):
+    return client.get("/spot-checks", params={"agent_id": agent_id, "open_only": True}, headers=ADMIN).json()
+
+
+def test_action_checks_are_off_by_default():
+    client, tokens = _setup()
+    a = _trusted(client, tokens, "t")
+    for _ in range(20):
+        assert access(client, a["token"]).status_code == 200
+    assert _open_checks(client, a["id"]) == []
+
+
+def test_each_allowed_action_can_be_checked_and_the_check_names_that_action():
+    client, tokens = _setup_action(1.0)
+    a = _trusted(client, tokens, "t")
+    r = access(client, a["token"])
+    assert r.status_code == 200
+    (check,) = _open_checks(client, a["id"])
+    assert check["validator_id"] == "validator-c"  # a and b endorsed it
+    assert check["action_event_id"] is not None
+    events = client.get("/audit", params={"agent_id": a["id"], "event_type": "access_allowed"}, headers=ADMIN).json()
+    assert check["action_event_id"] in {e["id"] for e in events}
+
+
+def test_agent_cannot_tell_whether_its_action_is_checked():
+    on, t_on = _setup_action(1.0)
+    off, t_off = _setup_action(0.0)
+    r_on = access(on, _trusted(on, t_on, "t")["token"])
+    r_off = access(off, _trusted(off, t_off, "t")["token"])
+    assert r_on.status_code == r_off.status_code == 200
+    assert set(r_on.json()) == set(r_off.json())
+    assert r_on.json()["document"] == r_off.json()["document"]
+    assert {k for k in r_on.headers if "spot" in k.lower()} == set()
+
+
+def test_denied_access_opens_no_check():
+    client, tokens = _setup_action(1.0)
+    p = register(client, "pending")
+    assert access(client, p["token"]).status_code == 403
+    assert _open_checks(client, p["id"]) == []
+
+
+def test_action_check_rate_is_respected_roughly():
+    client, tokens = _setup_action(0.25, seed=3)
+    a = _trusted(client, tokens, "t")
+    for _ in range(80):
+        access(client, a["token"])
+    n = len(_open_checks(client, a["id"]))
+    assert 8 <= n <= 35
+
+
+def test_failed_action_check_escalates_on_the_same_action_and_revokes_mid_stream():
+    client, tokens = _setup_action(1.0)
+    a = _trusted(client, tokens, "t")
+    access(client, a["token"])
+    (check,) = _open_checks(client, a["id"])
+    res = _result(client, check, tokens, False).json()
+    conf = res["confirmation"]
+    assert conf["action_event_id"] == check["action_event_id"]
+    assert conf["validator_id"] != check["validator_id"]
+    res2 = _result(client, conf, tokens, False).json()
+    assert res2["agent_status"] == "revoked"
+    assert access(client, a["token"]).status_code == 403  # the rest of its actions are cut off
+
+
+def test_action_with_no_independent_auditor_is_skipped_and_recorded():
+    client, tokens = _setup_action(1.0)
+    a = _trusted(client, tokens, "all", by=("validator-a", "validator-b", "validator-c"))
+    assert access(client, a["token"]).status_code == 200
+    assert _open_checks(client, a["id"]) == []
+    (ev,) = client.get("/audit", params={"agent_id": a["id"], "event_type": "spot_check_assigned"},
+                       headers=ADMIN).json()
+    assert ev["details"]["skipped"] == "no independent validator"
+    assert ev["details"]["action_event_id"] is not None
+
+
+def test_action_audit_rate_is_validated():
+    import pytest
+    with pytest.raises(ValueError):
+        create_app("sqlite://", action_audit_rate=1.5)
+
+
+def test_basic_tier_admits_pending_agents_is_action_audited_and_shuts_revoked_ones_out():
+    client, tokens = _setup_action(1.0)
+    p = register(client, "pending")
+    r = client.get("/protected/basic", headers=bearer(p["token"]))
+    assert r.status_code == 200
+    (check,) = _open_checks(client, p["id"])
+    conf = _result(client, check, tokens, False).json()["confirmation"]
+    assert _result(client, conf, tokens, False).json()["agent_status"] == "revoked"
+    assert client.get("/protected/basic", headers=bearer(p["token"])).status_code == 403

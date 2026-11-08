@@ -27,10 +27,12 @@ def record(
     actor_id: str | None = None,
     agent_id: str | None = None,
     **details: Any,
-) -> None:
+) -> AuditEvent:
     """Add an audit event to the current transaction (caller commits).
 
     Writing the event in the same transaction as the state change means the
     log can never claim something happened that was rolled back, or vice versa.
     """
-    session.add(AuditEvent(event_type=event_type, actor_id=actor_id, agent_id=agent_id, details=details))
+    event = AuditEvent(event_type=event_type, actor_id=actor_id, agent_id=agent_id, details=details)
+    session.add(event)
+    return event

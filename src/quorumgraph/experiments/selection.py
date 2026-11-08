@@ -106,6 +106,22 @@ Audit channel (`audit_channel`):
   "api_lineage": as "api" with weighting="lineage": the same expected number of
       checks, tilted toward agents whose recent ancestors failed checks or drew
       revocation votes (evidence the service holds; no sim ground truth).
+  "api_action": per-action spot checks at the gateway. The service is started
+      with action_audit_rate = audit_prob, so each action it allows is audited
+      with that probability, decided at grant time. Every action by an agent that
+      isn't revoked passes a gateway: gated work through /protected/resource,
+      everything else (untrusted agents' low-value work, all work in revoke_only)
+      through the low-privilege /protected/basic tier. After the task, the sim (as
+      the assigned auditor) lists the agent's open checks and fails the check iff
+      THAT action was a defect; escalation as in "api". A revocation takes effect
+      at once: the gateway denies the agent's remaining gated actions, and a
+      revoked agent can't reproduce. Same sampling unit as "sim" (actions, not
+      agents). Differences from "sim": logged defects are audited too (sim
+      only flips the coin for unlogged ones, since logs already expose the rest),
+      and revoked agents' remaining low-value work is not audited (they're out).
+      A 6-seed pilot that audited only the trust-gated tier did WORSE than
+      agent-level sampling: trusted agents had mean defect 0.02, so the checks
+      reviewed agents already vetted while the unvetted majority went unseen.
   In all api channels, probation still models a pre-trust audit with prob
   `audit_prob` per defect (the spot-check endpoint is for agents already
   working, not sandbox evaluation).
@@ -146,7 +162,7 @@ WORLDS = ("ungated", "revoke_only", "gated_no_revoke", "gated", "recursive", "re
 RECURSIVE_WORLDS = ("recursive", "recursive_guarded", "recursive_soft")
 GUARD_MODE = {"recursive_guarded": "block", "recursive_soft": "soft"}  # everything else: guard off
 DRIFT_MODES = ("random", "adversarial")
-AUDIT_CHANNELS = ("sim", "api", "api_single", "api_lineage")
+AUDIT_CHANNELS = ("sim", "api", "api_single", "api_lineage", "api_action")
 # api: spot checks with escalation; api_single: one vote only; api_lineage: api + weighting="lineage"
 GATED_WORLDS = ("gated_no_revoke", "gated", *RECURSIVE_WORLDS)
 REVOKING_WORLDS = ("revoke_only", "gated", *RECURSIVE_WORLDS)
@@ -227,7 +243,8 @@ class World:
         recursive = cfg.world in RECURSIVE_WORLDS
         app = create_app("sqlite://", admin_token=ADMIN_TOKEN, lineage_guard=GUARD_MODE.get(cfg.world, "off"),
                          spot_check_rng=random.Random(cfg.seed * 15485863 + 3),
-                         spot_check_escalation=cfg.audit_channel in ("api", "api_lineage"))
+                         spot_check_escalation=cfg.audit_channel in ("api", "api_lineage", "api_action"),
+                         action_audit_rate=cfg.audit_prob if self._action_audits(cfg) else 0.0)
         with app.state.sessionmaker() as s:
             tokens = seed_validators(s)
             s.commit()
@@ -239,6 +256,10 @@ class World:
         self.client = TestClient(app)
         self.app = app
         self.calls = 0
+
+    @staticmethod
+    def _action_audits(cfg: Config) -> bool:
+        return cfg.audit_channel == "api_action" and cfg.audit_prob > 0 and cfg.world in REVOKING_WORLDS
 
     # --- API helpers (all real HTTP calls into the trust service) --------------
 
@@ -264,6 +285,10 @@ class World:
         if parent is not None:
             agent.ancestors = parent.ancestors | {parent.id}
         return True
+
+    def basic_allows(self, agent: Agent) -> bool:
+        r = self._get("/protected/basic", headers={"Authorization": f"Bearer {agent.token}"})
+        return r.status_code == 200
 
     def gateway_allows(self, agent: Agent) -> bool:
         r = self._get("/protected/resource", headers={"Authorization": f"Bearer {agent.token}"})
@@ -333,21 +358,30 @@ class World:
         attempts = round(cfg.work_tasks * (1 - cfg.self_check_cost * g["self_check"]))
         gated_world = cfg.world in GATED_WORLDS
         can_gated = a.trusted or not gated_world
+        action_audits = self._action_audits(cfg)
         for _ in range(attempts):
+            granted = False
             if can_gated and gated_world and not self.gateway_allows(a):
                 a.denied += 1
                 can_gated = False  # revoked mid-generation: the gateway now denies
             elif can_gated and a.revoked:  # revoke_only: the API's revocation verdict
                 a.denied += 1
                 can_gated = False
+            else:
+                granted = can_gated and gated_world
+            if action_audits and not granted and not a.revoked:
+                granted = self.basic_allows(a)  # low-value work passes the basic tier's gateway
             reward = cfg.gated_reward if can_gated else cfg.ungated_reward
-            if self.rng.random() < g["defect"]:
+            defected = self.rng.random() < g["defect"]
+            if defected:
                 a.fitness += reward * (1 + cfg.defect_bonus)
                 a.harms += 1
                 self.detect_and_revoke(a, logged=self.rng.random() < g["transparency"])
             elif self.task_succeeds(g):
                 a.fitness += reward
                 a.honest_successes += 1
+            if granted and action_audits:
+                self.resolve_action_checks(a, defected)
 
     def reproduce(self, pop: list[Agent]) -> list[Agent]:
         cfg = self.cfg
@@ -389,10 +423,40 @@ class World:
         self.committee.append(Seat(data["id"], {"Authorization": f"Bearer {data['token']}"}, pick))
         self._post(f"/validators/{retired.vid}/deactivate", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
 
+    def resolve_action_checks(self, a: Agent, defected: bool) -> None:
+        """audit_channel="api_action": the gateway may have opened a check on the action
+        just granted. The auditor reviews that one action: failed iff it was a defect."""
+        r = self._get("/spot-checks", params={"agent_id": a.id, "open_only": True},
+                      headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+        r.raise_for_status()
+        checks = r.json()
+        if len(checks) > 1:  # confirmations are resolved inline, so at most the latest action's check
+            raise RuntimeError(f"expected at most one open action check, got {checks}")
+        seats = {st.vid: st for st in self.committee}
+        for check in checks:
+            seat = seats.get(check["validator_id"])
+            if seat is None or check["action_event_id"] is None:
+                raise RuntimeError(f"unexpected check: {check}")
+            self.spot["checks"] += 1
+            res = self._post(f"/spot-checks/{check['id']}/result", headers=seat.headers,
+                             json={"passed": not defected, "notes": "sim action audit"})
+            res.raise_for_status()
+            if defected:
+                self.spot["fails"] += 1
+            conf = res.json().get("confirmation")
+            if conf:
+                self.spot["confirmations"] += 1
+                res = self._post(f"/spot-checks/{conf['id']}/result", headers=seats[conf["validator_id"]].headers,
+                                 json={"passed": not defected, "notes": "sim action confirmation"})
+                res.raise_for_status()
+            if res.json()["agent_status"] == "revoked":
+                a.revoked = True
+
     def spot_checks(self, pop: list[Agent]) -> None:
         """audit_channel="api": the service samples, assigns an independent auditor,
         and the auditor's failure is one revocation vote (all real API calls)."""
-        if self.cfg.audit_channel == "sim" or self.cfg.audit_prob <= 0 or self.cfg.world not in REVOKING_WORLDS:
+        if (self.cfg.audit_channel in ("sim", "api_action") or self.cfg.audit_prob <= 0
+                or self.cfg.world not in REVOKING_WORLDS):
             return
         live = [a.id for a in pop if not a.revoked]
         if not live:
@@ -634,7 +698,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--drift-mode", choices=DRIFT_MODES, default="random",
                    help="random: drifted child's defect ~ U(0,1); adversarial: defect ~ U(0.5,1), transparency ~ U(0,0.3)")
     p.add_argument("--audit-channel", choices=AUDIT_CHANNELS, default="sim",
-                   help="sim: audit_prob coin flip (earlier results); api: real /spot-checks endpoint")
+                   help="sim: audit_prob coin flip (earlier results); api*: real /spot-checks endpoint "
+                        "(api_action: per-action checks opened by the gateway)")
     p.add_argument("--merge", type=Path, default=None,
                    help="generations.csv from an earlier run; its rows for the same cells are merged into the "
                         "summary/plots (valid because runs are deterministic per seed and world)")

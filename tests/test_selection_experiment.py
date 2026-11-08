@@ -185,3 +185,41 @@ def test_adversarial_drift_makes_drifted_children_bad_and_opaque():
     assert all(k.genome["defect"] >= 0.5 and k.genome["transparency"] <= 0.3 for k in kids)
     rows = run_one(Config(world="gated", seed=3, drift_prob=0.2, drift_mode="adversarial", **SMALL))
     assert rows[0]["drift_mode"] == "adversarial"
+
+
+def test_api_action_channel_audits_actions_at_the_gateway():
+    w = World(Config(world="gated", seed=4, pop_size=30, generations=6, audit_prob=0.5, audit_channel="api_action",
+                     init_defect_max=0.6))
+    paths, orig = [], w._post
+    w._post = lambda path, **k: (paths.append(path), orig(path, **k))[1]
+    revoked_then_denied = []
+    orig_resolve = w.resolve_action_checks
+
+    def resolve(a, defected):
+        was = a.revoked
+        orig_resolve(a, defected)
+        if a.revoked and not was:
+            revoked_then_denied.append(not w.gateway_allows(a))
+    w.resolve_action_checks = resolve
+    rows = w.run()
+    assert "/spot-checks/sample" not in paths  # no agent-level sampling on this channel
+    assert sum(r["spot_checks"] for r in rows) > 0
+    assert sum(r["spot_confirmations"] for r in rows) > 0  # escalation on
+    assert revoked_then_denied and all(revoked_then_denied)  # revocation cuts off the rest at once
+
+
+def test_api_action_channel_is_reproducible_with_promotions_and_drift():
+    cfg = Config(world="recursive_soft", seed=3, pop_size=30, generations=6, audit_prob=0.5,
+                 audit_channel="api_action", drift_prob=0.2)
+    assert run_one(cfg) == run_one(cfg)
+
+
+def test_api_action_channel_audits_untrusted_work_through_the_basic_tier():
+    # revoke_only has no trust gate, so every action goes through /protected/basic
+    w = World(Config(world="revoke_only", seed=4, pop_size=20, generations=3, audit_prob=0.5,
+                     audit_channel="api_action", init_defect_max=0.6))
+    gets, orig = [], w._get
+    w._get = lambda path, **k: (gets.append(path), orig(path, **k))[1]
+    rows = w.run()
+    assert "/protected/basic" in gets and "/protected/resource" not in gets
+    assert sum(r["spot_checks"] for r in rows) > 0 and sum(r["spot_fails"] for r in rows) > 0
