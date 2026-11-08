@@ -30,7 +30,7 @@ class TrustDecision:
     revocation_votes: int
     endorsement_quorum: int
     revocation_quorum: int
-    needs_independent: bool = False  # soft guard: quorum met, but only by the agent's own lineage
+    needs_independent: bool = False  # soft guard: quorum met, but only by the agent's kin
 
     @property
     def allowed(self) -> bool:
@@ -41,7 +41,7 @@ class TrustDecision:
         if self.status is AgentStatus.REVOKED:
             return "agent has been revoked"
         if self.status is AgentStatus.PENDING and self.needs_independent:
-            return "endorsement quorum met only by the agent's own lineage; needs an independent endorser"
+            return "endorsement quorum met only by the agent's kin; needs an independent endorser"
         if self.status is AgentStatus.PENDING:
             return f"endorsement quorum not met ({self.endorsements}/{self.endorsement_quorum})"
         return "endorsement quorum met"
@@ -75,19 +75,32 @@ def is_lineage(session: Session, *, ancestor_id: str, agent: Agent) -> bool:
     return True  # deeper than the cap: refuse rather than guess (fail closed)
 
 
+def is_kin(session: Session, *, validator_agent_id: str | None, agent: Agent) -> bool:
+    """A promoted validator is kin of `agent` if its source agent is the agent itself,
+    an ancestor, or a descendant. Symmetric on purpose: a child's validator vouching
+    for (or auditing) its parent is the same conflict of interest as the reverse.
+    Seeded validators (no source agent) are never kin."""
+    if validator_agent_id is None:
+        return False
+    if is_lineage(session, ancestor_id=validator_agent_id, agent=agent):
+        return True
+    source = session.get(Agent, validator_agent_id)
+    return source is not None and is_lineage(session, ancestor_id=agent.id, agent=source)
+
+
 def lineage_guard_mode(session: Session) -> str:
     return session.info.get("lineage_guard", config.LINEAGE_GUARD)
 
 
 def _has_independent_endorser(session: Session, agent: Agent) -> bool:
-    """At least one active endorser is a seeded validator, or a promoted one whose
-    agent is not this agent or an ancestor of it."""
+    """At least one active endorser is a seeded validator, or a promoted one that is
+    not kin (see is_kin)."""
     rows = session.execute(
         select(Validator.agent_id)
         .join(Endorsement, Endorsement.validator_id == Validator.id)
         .where(Endorsement.agent_id == agent.id, Validator.active.is_(True))
     ).all()
-    return any(vid is None or not is_lineage(session, ancestor_id=vid, agent=agent) for (vid,) in rows)
+    return any(not is_kin(session, validator_agent_id=vid, agent=agent) for (vid,) in rows)
 
 
 def evaluate(session: Session, agent: Agent) -> TrustDecision:

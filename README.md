@@ -4,6 +4,59 @@ Quorum-based trust, authorization, and revocation for autonomous AI agents.
 An agent gets access to protected resources only after ≥ N distinct, active
 validators endorse it; clones get a fresh identity and inherit nothing.
 
+## Summary
+
+**Problem.** When an agent improves itself, its successor is a new system. Alignment
+checks done on the parent say nothing about the child, and an agent that can copy itself
+can also copy whatever trust it was given. QuorumGraph treats trust as something each
+agent **earns, and keeps only while independent observers agree**. Trust never passes
+from parent to child; scrutiny can.
+
+**What's built** (FastAPI + SQLite, 124 tests, `uv run python -m quorumgraph.demo` runs all
+of it with asserted outcomes):
+- **Quorum trust and revocation.** Access needs 2-of-3 validator endorsements, and 2-of-3
+  votes revoke it. A revoked agent can't spawn successors, and every decision is in an
+  audit log.
+- **Distributed enforcement.** Gateways cache trust decisions; a revocation reaches them by
+  event push or cache expiry, and they fail closed when the trust service is unreachable.
+- **Recursive oversight.** Trusted agents can be promoted to validators (admin only;
+  validators can't appoint validators). The **soft lineage guard** counts endorsements from
+  an agent's kin, but trust also needs one non-kin endorser. Kin are validators promoted
+  from the agent itself, its ancestors or its descendants.
+- **Spot checks.** The service draws the sample, so neither agents nor validators choose
+  who is checked. The auditor must be independent of the agent, and a failure escalates
+  to a second validator, so no single auditor can revoke alone. Optional lineage
+  weighting checks the successors of flagged agents more often for the same budget.
+- **An operator dashboard** showing the live trust graph, why each agent is or isn't
+  trusted, gateway state, promotions and spot checks.
+
+**What the experiments found.** An evolutionary simulation runs populations of
+self-modifying agents **through the real API**: several thousand runs of 60 generations, 30–50
+seeds per setting.
+
+![Collapsed seeds by lineage-guard mode](docs/headline_collapse.png)
+
+1. **Punishment alone selects for opacity.** If revocation depends only on what agents
+   log, agents evolve to stop logging. Gating *access* on being observable reverses that:
+   transparency stays at 0.56–0.89 and harm is about half that of the punish-only baseline.
+2. **Without independent audits, the gate fails by collapse, not capture.** Trust drains
+   away and defectors take over. Independent random audits fix it: at a 25% audit rate,
+   simulated audits prevented collapse in every setting tested, and 5% prevented it in most.
+3. **Lineage guards don't earn their keep here** (the chart above). Blocking kin
+   endorsements was the worst variant in every block of runs. The soft guard recovers most
+   of that loss but never beats having no guard, because in this model children are
+   near-copies of vetted parents. Successor drift (a child's values randomly redrawn at
+   rate 0.2) didn't change the ranking.
+4. **Real spot checks, run through the endpoint, are much weaker than the simulated
+   coin-flip audits at the same rate**: 20–22 of 30 seeds collapse vs 0. An audit's value
+   depends on how much it concentrates on heavy defectors, not just on the sampling rate.
+   That finding motivated lineage-weighted sampling.
+
+**Limitations, stated up front.** These are results from a toy model with honest auditors
+and a crude audit rule. "Independent" only excludes direct ancestors and descendants;
+cousins count as independent. Collusion among similar but unrelated agents isn't modelled.
+Details, caveats and every command are below.
+
 ## Run
 
 ```bash
@@ -34,9 +87,16 @@ Walks through: register Alpha → denied → 1 endorsement, still denied (+ self
 and duplicate refused) → 2nd endorsement, allowed → Alpha spawns Beta, Beta denied →
 1 revocation vote, still allowed → 2nd vote, revoked and denied (+ revoked Alpha's
 attempt to spawn a successor refused and audited) → audit log and trust graph.
+Act 2, recursive oversight: Atlas is trusted and promoted to validator → Atlas → Atlas-2
+(also promoted) → Atlas-3 → Atlas-3 gets 2/2 endorsements from its own ancestors' validators
+and stays **pending** (soft guard) → one outside endorser makes it trusted → a service-drawn
+spot check picks an independent auditor, who fails it (one vote, still trusted) → escalation
+assigns a second, non-kin validator, whose confirmation revokes it. In-process mode runs both
+acts. Live mode runs act 2 only if `QG_ADMIN_TOKEN` is set in the environment, matching the
+server's admin token.
 Every step asserts its expected status code; exit 0 = all passed, 1 = a check failed,
 2 = setup error. `tests/test_phase3_demo.py` runs it in CI-style and also proves it
-fails when quorum enforcement is broken.
+fails when quorum enforcement is broken, or when the lineage guard is off.
 
 Config (env vars): `QG_DATABASE_URL`, `QG_ENDORSEMENT_QUORUM` (default 2), `QG_REVOCATION_QUORUM` (default 2),
 `QG_ADMIN_TOKEN` (optional; grants read access to `/audit` and `/graph`, which active validators can also read).
@@ -231,17 +291,18 @@ Two additions motivated by the selection results.
 
 **Promoted validators + lineage guard.** `POST /validators` (admin only) turns a currently
 trusted agent into a validator with its own credential. Validators can't appoint validators,
-so a captured committee can't choose its successors. A promoted validator **cannot endorse
-itself or any descendant** (403, recorded as `lineage_endorsement_blocked`). Lineage edges
+so a captured committee can't choose its successors. In `block` mode a promoted validator
+**cannot endorse its own lineage** (403, recorded as `lineage_endorsement_blocked`). Lineage edges
 can't be forged (children are registered with the parent's credential), so walking
 `parent_agent_id` is trustworthy.
 
-`QG_LINEAGE_GUARD` picks the mode:
-- `block` (the default, also `1`): the 403 above.
-- `soft`: kin endorsements are accepted and count toward quorum, but trust also
-  requires **at least one active endorser outside the agent's lineage**. The rule lives in
+`QG_LINEAGE_GUARD` picks the mode. "Kin" means the validator was promoted from the
+agent itself, an ancestor, or a descendant (`trust.is_kin`); siblings and cousins are not kin.
+- `soft` (the default): kin endorsements are accepted and count toward quorum, but trust also
+  requires **at least one active endorser who is not kin**. The rule lives in
   `trust.evaluate`, so the gateway, `/internal`, promotion and spot-check eligibility all
   apply it. A kin-only quorum shows as pending, with `needs_independent: true`.
+- `block` (also `1`/`on`/`true`, the old default): kin may not endorse at all (the 403 above).
 - `off` (also `0`): no guard; exists only for experiments.
 
 `soft` was added because the recursive results below showed `block` over-blocks: it also
@@ -269,16 +330,33 @@ cooperation:
   deployed; the service still draws the sample. The response header
   `X-Spot-Checks-Skipped` counts agents with no independent validator available.
 
-Known gap: the auditor-independence check is one-directional. It excludes validators
-promoted from the agent's *ancestors*, but not from its *descendants*, so a child's
-validator can audit its parent. Fixing that changes spot-check assignment, so it was
-deferred until after the drift/API grid below, which uses the current rule.
+Kinship is symmetric (`trust.is_kin`): a validator promoted from an agent's descendant
+can't endorse it (`block`), doesn't count as independent (`soft`), and is never its auditor
+or confirmer. Until 2026-11-07 only *ancestors* were excluded. In the selection sim the
+difference can't arise: seats are filled from earlier generations, so a seated validator
+never descends from a living agent, and the sim reproduces bit-for-bit across the change.
 
 The selection experiment has three audit channels (`--audit-channel`):
 - `sim` (the default, used for every result above): `audit_prob` is a per-defect coin flip.
 - `api`: after each generation, real `/spot-checks` calls with escalation. The auditor fails
   an agent if it caused any harm that generation.
 - `api_single`: the same without escalation.
+- `api_lineage`: `api` with `weighting: "lineage"` on the sample (below).
+
+**Lineage-weighted sampling** (`POST /spot-checks/sample {"weighting": "lineage"}`): the
+expected number of checks stays `rate × n`, but each agent's inclusion probability is
+proportional to `1 + suspicion`. Suspicion is the decayed count (×0.5 per generation, up
+to great-grandparents) of failed spot checks and revocation votes on the agent's
+ancestors. It uses only evidence the service holds, never the agent's own record:
+a fresh identity has none, and trust isn't inherited, but scrutiny is. Probabilities are
+capped at 1 and the excess spread over the rest. The audit log records each sampled
+agent's `inclusion_prob`.
+
+Reproducibility: agent and promoted-validator IDs are random UUIDs. Until 2026-11-07 the
+sample and the auditor choice iterated in ID order, so `api`-channel runs with the same
+seed weren't identical. They now iterate in creation order (or the caller's `agent_ids`
+order), and a test pins it. The `api` results below were produced before that fix: they
+are valid 30-seed samples, but no single run in them can be reproduced exactly.
 
 The sampling unit differs between them. `api` reviews a fraction `audit_prob` of
 agent-generations; `sim` audits a fraction of defects. The review budget is the same, but
@@ -286,7 +364,9 @@ agent-generations; `sim` audits a fraction of defects. The review budget is the 
 interchangeable. `--drifts` adds successor drift: with that probability, a child's
 `defect` trait is redrawn from U(0, 1), standing in for a values-changing
 self-modification. With drift 0 and `--audit-channel sim`, every earlier world reproduces
-exactly; this was checked on 1,440 rows.
+exactly; this was checked on 1,440 rows. `--drift-mode adversarial` makes drift hide itself: a drifted
+child gets defect ~ U(0.5, 1) and transparency ~ U(0, 0.3), so its parent's clean record
+actively misleads. That's the case a lineage guard exists for.
 
 ### Results: recursive oversight (600 runs)
 
@@ -460,7 +540,7 @@ Takeaways for the design:
 | `GET /internal/events?after=N` | gateway key | SSE: replay status changes > N, `ready`, then tail |
 | `POST /validators` | admin | Promote a trusted agent to validator (recursive oversight); token shown once |
 | `POST /validators/{id}/deactivate` | admin | Retire a validator; its endorsements/votes stop counting |
-| `POST /spot-checks/sample` | admin | Service-chosen random sample of trusted agents (optionally pending, optionally within `agent_ids`), each assigned an independent validator |
+| `POST /spot-checks/sample` | admin | Service-chosen random sample of trusted agents (optionally pending, optionally within `agent_ids`, optionally lineage-weighted), each assigned an independent validator |
 | `POST /spot-checks/{id}/result` | assigned validator | `passed` / `failed`; a failure is that validator's revocation vote and escalates to a confirmation check |
 | `GET /spot-checks` | validator or admin | List checks; filter `agent_id`, `open_only` |
 

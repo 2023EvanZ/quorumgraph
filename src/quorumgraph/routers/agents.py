@@ -60,7 +60,6 @@ def cast_revocation_vote(session: Session, validator: Validator, agent: Agent, r
     return trust.refresh_status(session, agent, actor_id=validator.id)
 
 
-_is_lineage = trust.is_lineage
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=AgentCreated)
@@ -142,13 +141,13 @@ def endorse_agent(
     agent = _get_agent_or_404(session, agent_id)
     if agent.status is AgentStatus.REVOKED:
         raise HTTPException(status.HTTP_409_CONFLICT, "cannot endorse a revoked agent")
-    if validator.agent_id is not None and request.app.state.lineage_guard == "block" and _is_lineage(
-        session, ancestor_id=validator.agent_id, agent=agent
+    if request.app.state.lineage_guard == "block" and trust.is_kin(
+        session, validator_agent_id=validator.agent_id, agent=agent
     ):
         audit.record(session, audit.LINEAGE_ENDORSEMENT_BLOCKED, actor_id=validator.id, agent_id=agent.id,
                      validator_agent_id=validator.agent_id)
         session.commit()
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "validators may not endorse themselves or their descendants")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "validators may not endorse their own lineage (self, ancestors or descendants)")
 
     session.add(Endorsement(validator_id=validator.id, agent_id=agent.id))
     try:

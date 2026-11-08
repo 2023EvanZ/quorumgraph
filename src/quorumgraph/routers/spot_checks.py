@@ -7,7 +7,8 @@ that: an opaque agent is as likely to be checked as a transparent one.
 
     POST /spot-checks/sample           admin: service-chosen random sample of trusted agents
                                        (include_pending: also pending ones, for deployments
-                                       without an endorsement gate)
+                                       without an endorsement gate; weighting="lineage":
+                                       same budget, tilted toward successors of flagged agents)
     POST /spot-checks/{id}/result      the assigned validator: passed / failed
     GET  /spot-checks                  operator: list, filter by agent or open
 
@@ -15,7 +16,7 @@ Design choices:
 - The *service* draws the sample (app.state.spot_check_rng, SystemRandom by
   default). Neither agents nor validators can pick who is checked.
 - The auditor is an active validator that did NOT endorse the agent and is not
-  in its lineage: whoever vouched for an agent shouldn't be the one checking it
+  its kin (trust.is_kin: promoted from the agent, an ancestor, or a descendant): whoever vouched for an agent shouldn't be the one checking it
   (the double-entry idea: two independent records).
 - A failure is exactly one revocation vote from the auditor. Revocation still
   needs quorum, so a single corrupt auditor can't revoke anyone alone.
@@ -27,18 +28,20 @@ Design choices:
   agents were ever revoked: the second vote almost never came from elsewhere.
 """
 
+from collections import Counter
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import audit, trust
 from ..db import get_session
-from ..models import Agent, AgentStatus, Endorsement, SpotCheck, Validator
+from ..models import Agent, AgentStatus, Endorsement, RevocationVote, SpotCheck, Validator
 from ..security import get_current_validator, get_operator, require_admin
-from ..trust import is_lineage as _is_lineage
+from ..trust import is_kin
 from .agents import cast_revocation_vote
 
 router = APIRouter(prefix="/spot-checks", tags=["spot-checks"])
@@ -50,6 +53,13 @@ class SampleIn(BaseModel):
     agent_ids: list[str] | None = Field(None, max_length=10_000,
                                         description="restrict the sampling frame to these agents (e.g. the ones "
                                                     "currently deployed); the service still draws the sample")
+    weighting: Literal["uniform", "lineage"] = Field(
+        "uniform", description="lineage: same expected number of checks, but agents whose recent ancestors "
+                               "failed spot checks or drew revocation votes are more likely to be picked")
+
+
+LINEAGE_DEPTH = 3     # ancestors looked at: parent, grandparent, great-grandparent
+LINEAGE_DECAY = 0.5   # each generation further back counts half as much
 
 
 class SpotCheckOut(BaseModel):
@@ -77,18 +87,30 @@ def _out(c: SpotCheck) -> SpotCheckOut:
     return SpotCheckOut.model_validate(c, from_attributes=True)
 
 
+def _active_validators(session: Session) -> list[Validator]:
+    """Active validators in a stable order (seeded by id, then promoted by when their
+    agent was created). Promoted ids are random, so ordering by id would make the
+    rng's choice depend on uuid luck and experiments with a seeded rng irreproducible."""
+    rows = session.execute(
+        select(Validator, Agent.created_at).outerjoin(Agent, Agent.id == Validator.agent_id)
+        .where(Validator.active.is_(True))
+    ).all()
+    rows.sort(key=lambda r: (r[1] is not None, r[1] or datetime.min.replace(tzinfo=timezone.utc), r[0].id))
+    return [v for v, _ in rows]
+
+
 def _pick_auditor(session: Session, agent: Agent, rng) -> Validator | None:
     endorsers = set(session.scalars(select(Endorsement.validator_id).where(Endorsement.agent_id == agent.id)))
-    active = list(session.scalars(select(Validator).where(Validator.active.is_(True)).order_by(Validator.id)))
+    active = _active_validators(session)
     independent = [v for v in active if v.id not in endorsers
-                   and not (v.agent_id and _is_lineage(session, ancestor_id=v.agent_id, agent=agent))]
+                   and not is_kin(session, validator_agent_id=v.agent_id, agent=agent)]
     return rng.choice(independent) if independent else None
 
 
 def _pick_confirmer(session: Session, agent: Agent, first: SpotCheck, rng) -> Validator | None:
-    active = list(session.scalars(select(Validator).where(Validator.active.is_(True)).order_by(Validator.id)))
+    active = _active_validators(session)
     ok = [v for v in active if v.id != first.validator_id
-          and not (v.agent_id and _is_lineage(session, ancestor_id=v.agent_id, agent=agent))]
+          and not is_kin(session, validator_agent_id=v.agent_id, agent=agent)]
     return rng.choice(ok) if ok else None
 
 
@@ -109,6 +131,56 @@ def _escalate(session: Session, request: Request, check: SpotCheck, agent: Agent
     return follow
 
 
+def _suspicion(session: Session, agents: list[Agent]) -> dict[str, float]:
+    """Per agent: decayed count of failed spot checks + revocation votes on its recent
+    ancestors. Only evidence the service itself holds; the agent's own record is not
+    used (a fresh identity has none, and trust is never inherited, but scrutiny is)."""
+    fails = Counter(dict(session.execute(
+        select(SpotCheck.agent_id, func.count()).where(SpotCheck.result == "failed").group_by(SpotCheck.agent_id)
+    ).all()))
+    votes = Counter(dict(session.execute(
+        select(RevocationVote.agent_id, func.count()).group_by(RevocationVote.agent_id)
+    ).all()))
+    parent_of: dict[str, str | None] = {}
+
+    def parent(aid: str) -> str | None:
+        if aid not in parent_of:
+            a = session.get(Agent, aid)
+            parent_of[aid] = a.parent_agent_id if a else None
+        return parent_of[aid]
+
+    out = {}
+    for a in agents:
+        score, node, w = 0.0, a.parent_agent_id, 1.0
+        for _ in range(LINEAGE_DEPTH):
+            if node is None:
+                break
+            score += w * (fails[node] + votes[node])
+            node, w = parent(node), w * LINEAGE_DECAY
+        out[a.id] = score
+    return out
+
+
+def _inclusion_probs(rate: float, weights: list[float]) -> list[float]:
+    """p_i proportional to w_i with sum(p) = rate * n (the uniform budget), capped at 1;
+    capped excess is spread over the rest (water-filling)."""
+    n = len(weights)
+    budget, probs, free = rate * n, [0.0] * n, list(range(n))
+    while free:
+        total = sum(weights[i] for i in free)
+        scale = budget / total if total > 0 else 0.0
+        over = [i for i in free if weights[i] * scale >= 1]
+        if not over:
+            for i in free:
+                probs[i] = weights[i] * scale
+            break
+        for i in over:
+            probs[i] = 1.0
+        budget -= len(over)
+        free = [i for i in free if i not in set(over)]
+    return probs
+
+
 @router.post("/sample", status_code=status.HTTP_201_CREATED, response_model=list[SpotCheckOut],
              dependencies=[Depends(require_admin)])
 def sample(body: SampleIn, request: Request, response: Response,
@@ -119,13 +191,24 @@ def sample(body: SampleIn, request: Request, response: Response,
     the committee is too small or too entangled to audit them."""
     rng = request.app.state.spot_check_rng
     wanted = {AgentStatus.TRUSTED, AgentStatus.PENDING} if body.include_pending else {AgentStatus.TRUSTED}
-    stmt = select(Agent).where(Agent.status.in_(wanted)).order_by(Agent.id)
+    stmt = select(Agent).where(Agent.status.in_(wanted)).order_by(Agent.created_at, Agent.id)
     if body.agent_ids is not None:
         stmt = stmt.where(Agent.id.in_(body.agent_ids))
-    candidates = session.scalars(stmt)
+    candidates = list(session.scalars(stmt))
+    if body.agent_ids is not None:  # walk the caller's order (stable), not uuid order
+        rank = {aid: i for i, aid in enumerate(dict.fromkeys(body.agent_ids))}
+        candidates.sort(key=lambda a: rank[a.id])
     created, skipped = [], 0
+    if body.weighting == "lineage":
+        candidates = [a for a in candidates if trust.evaluate(session, a).status in wanted]
+        susp = _suspicion(session, candidates)
+        probs = dict(zip((a.id for a in candidates),
+                         _inclusion_probs(body.rate, [1.0 + susp[a.id] for a in candidates])))
     for agent in candidates:
-        if trust.evaluate(session, agent).status not in wanted or rng.random() >= body.rate:
+        if body.weighting == "lineage":
+            if rng.random() >= probs[agent.id]:
+                continue
+        elif trust.evaluate(session, agent).status not in wanted or rng.random() >= body.rate:
             continue
         auditor = _pick_auditor(session, agent, rng)
         if auditor is None:
@@ -136,8 +219,9 @@ def sample(body: SampleIn, request: Request, response: Response,
         check = SpotCheck(agent_id=agent.id, validator_id=auditor.id)
         session.add(check)
         session.flush()
+        extra = {"inclusion_prob": round(probs[agent.id], 4)} if body.weighting == "lineage" else {}
         audit.record(session, audit.SPOT_CHECK_ASSIGNED, actor_id="admin", agent_id=agent.id,
-                     validator_id=auditor.id, spot_check_id=check.id)
+                     validator_id=auditor.id, spot_check_id=check.id, **extra)
         created.append(check)
     session.commit()
     response.headers["X-Spot-Checks-Skipped"] = str(skipped)

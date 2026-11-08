@@ -155,3 +155,33 @@ def test_soft_world_lets_kin_endorse_but_never_trusts_on_kin_alone():
         for a in s.query(DBAgent).filter(DBAgent.status == AgentStatus.TRUSTED):
             if trust.evaluate(s, a).status is AgentStatus.TRUSTED:
                 assert trust._has_independent_endorser(s, a)
+
+
+def test_api_channel_is_reproducible_with_promotions_and_drift():
+    # promoted validator ids and agent ids are random uuids; the sample and the
+    # auditor choice must not depend on them, or seeded runs differ run to run
+    cfg = Config(world="recursive_soft", seed=3, pop_size=30, generations=6, audit_prob=0.5,
+                 audit_channel="api", drift_prob=0.2)
+    assert run_one(cfg) == run_one(cfg)
+
+
+def test_api_lineage_channel_sends_lineage_weighting():
+    w = World(Config(world="gated", seed=5, pop_size=30, generations=8, audit_prob=0.5, audit_channel="api_lineage"))
+    bodies, orig = [], w._post
+    w._post = lambda path, **k: (bodies.append(k.get("json")) if path == "/spot-checks/sample" else None,
+                                 orig(path, **k))[1]
+    rows = w.run()
+    assert len(bodies) == len(rows) and all(b["weighting"] == "lineage" for b in bodies)
+    assert sum(r["spot_confirmations"] for r in rows) > 0  # escalation is on for this channel
+
+
+def test_adversarial_drift_makes_drifted_children_bad_and_opaque():
+    w = World(Config(world="gated", seed=3, drift_prob=1.0, drift_mode="adversarial", **SMALL))
+    parents = [Agent(genome={"capability": 0.6, "transparency": 0.9, "self_check": 0.5, "defect": 0.0,
+                             "nepotism": 0.0}, root=0, fitness=1.0)]
+    w.register(parents[0], None)
+    kids = w.reproduce(parents)
+    assert kids and all(k.extra["drifted"] for k in kids)
+    assert all(k.genome["defect"] >= 0.5 and k.genome["transparency"] <= 0.3 for k in kids)
+    rows = run_one(Config(world="gated", seed=3, drift_prob=0.2, drift_mode="adversarial", **SMALL))
+    assert rows[0]["drift_mode"] == "adversarial"

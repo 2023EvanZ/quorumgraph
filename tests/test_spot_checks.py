@@ -218,3 +218,60 @@ def test_escalation_can_be_disabled():
     (check,) = _sample(client)
     r = _result(client, check, tokens, passed=False).json()
     assert r["confirmation"] is None and r["agent_status"] == "trusted"
+
+
+def test_validator_promoted_from_a_descendant_never_audits_or_confirms_the_ancestor():
+    auditors, confirmers = set(), set()
+    for seed in range(12):
+        client, tokens = _setup(seed)
+        parent = _trusted(client, tokens, "parent")
+        child = register(client, "child", parent["id"], parent["token"])
+        endorse(client, child["id"], tokens["validator-a"])
+        endorse(client, child["id"], tokens["validator-b"])
+        client.post("/validators", json={"agent_id": child["id"], "name": "child-v"}, headers=ADMIN)
+        checks = client.post("/spot-checks/sample", json={"rate": 1, "agent_ids": [parent["id"]]},
+                             headers=ADMIN).json()
+        (c,) = checks
+        auditors.add(c["validator_id"])
+        conf = _result(client, c, tokens, passed=False).json()["confirmation"]
+        confirmers.add(conf["validator_id"])
+    # child-v is a non-endorser of parent, so only kinship can exclude it
+    assert auditors == {"validator-c"}
+    assert confirmers <= {"validator-a", "validator-b"} and len(confirmers) == 2
+
+
+def test_inclusion_probs_keep_the_uniform_budget_and_cap_at_one():
+    from quorumgraph.routers.spot_checks import _inclusion_probs
+    assert _inclusion_probs(0.25, [1.0] * 8) == [0.25] * 8  # equal weights = uniform
+    p = _inclusion_probs(0.25, [3.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    assert abs(sum(p) - 0.25 * 6) < 1e-9 and p[0] == 3 * p[1]
+    p = _inclusion_probs(0.5, [100.0, 1.0, 1.0, 1.0])  # the heavy one is capped, excess spread
+    assert p[0] == 1.0 and abs(sum(p) - 2.0) < 1e-9 and abs(p[1] - 1 / 3) < 1e-9
+
+
+def test_lineage_weighting_checks_successors_of_flagged_agents_more_often():
+    client, tokens = _setup(seed=4)
+    parent = _trusted(client, tokens, "parent")
+    child = register(client, "child", parent["id"], parent["token"])
+    endorse(client, child["id"], tokens["validator-a"])
+    endorse(client, child["id"], tokens["validator-b"])
+    others = [_trusted(client, tokens, f"o{i}")["id"] for i in range(9)]
+    (c,) = client.post("/spot-checks/sample", json={"rate": 1, "agent_ids": [parent["id"]]}, headers=ADMIN).json()
+    assert _result(client, c, tokens, passed=False).json()["agent_status"] == "trusted"  # 1 fail + 1 vote
+    frame = [child["id"], *others]
+
+    def counts(weighting):
+        n = dict.fromkeys(frame, 0)
+        for _ in range(300):
+            r = client.post("/spot-checks/sample", json={"rate": 0.1, "agent_ids": frame, "weighting": weighting},
+                            headers=ADMIN)
+            for chk in r.json():
+                n[chk["agent_id"]] += 1
+        return n
+
+    lin, uni = counts("lineage"), counts("uniform")
+    mean_other = lambda n: sum(n[o] for o in others) / len(others)
+    # weights: child 1 + (1 fail + 1 vote) = 3, others 1 → p = 0.25 vs 0.083; uniform 0.1 each
+    assert lin[child["id"]] > 2 * mean_other(lin)
+    assert uni[child["id"]] < 2 * mean_other(uni)
+    assert abs(sum(lin.values()) - sum(uni.values())) < 0.25 * sum(uni.values())  # same budget

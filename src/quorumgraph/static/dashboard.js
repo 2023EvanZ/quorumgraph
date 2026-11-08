@@ -372,7 +372,7 @@ function meter(kind, have, need) {
 function whySentence(d) {
   if (d.status === "revoked") return `Revoked: ${d.revocation_votes} of ${d.revocation_quorum} required revocation votes. Revocation is permanent; this credential is dead at every gateway.`;
   if (d.status === "trusted") return `Trusted: endorsed by ${d.endorsements} of the ${d.endorsement_quorum} distinct active validators required.` + (d.revocation_votes ? ` ${d.revocation_votes} of ${d.revocation_quorum} revocation votes so far.` : "");
-  if (d.needs_independent) return `Pending: ${d.endorsements} endorsements meet the count, but every one comes from a validator promoted out of this agent's own lineage. The lineage guard (soft mode) requires at least one independent endorser.`;
+  if (d.needs_independent) return `Pending: ${d.endorsements} endorsements meet the count, but every one comes from a validator promoted out of this agent's own lineage (itself, an ancestor or a descendant). The lineage guard (soft mode) requires at least one independent endorser.`;
   return `Pending: ${d.endorsements} of ${d.endorsement_quorum} required endorsements. Gateways deny it until quorum is met.`;
 }
 

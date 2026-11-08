@@ -54,3 +54,42 @@ def test_revoked_agent_replication_attempt_is_audited(client, validators):
     assert len(events) == 1
     assert events[0]["actor_id"] == alpha["id"]
     assert events[0]["details"]["requested_parent"] == alpha["id"]
+
+
+def _oversight_app(guard):
+    import random
+
+    from fastapi.testclient import TestClient
+
+    from quorumgraph.main import create_app
+    from quorumgraph.seed import seed_validators
+
+    app = create_app("sqlite://", admin_token="admin-secret", lineage_guard=guard,
+                     spot_check_rng=random.Random(0), spot_check_escalation=True)
+    with app.state.sessionmaker() as s:
+        tokens = seed_validators(s)
+        s.commit()
+    return TestClient(app), tokens
+
+
+def test_oversight_act_passes_and_revokes_through_spot_checks():
+    client, tokens = _oversight_app("soft")
+    lines: list[str] = []
+    d = Demo(client, tokens, out=lines.append)
+    d.run()
+    agents = d.run_oversight("admin-secret")
+    assert lines[-1] == "Recursive oversight checks passed." and not any("✘" in line for line in lines)
+    assert client.get(f"/agents/{agents['atlas3']['id']}").json()["status"] == "revoked"
+
+
+def test_oversight_act_fails_when_the_lineage_guard_is_off():
+    client, tokens = _oversight_app("off")
+    d = Demo(client, tokens, out=lambda _: None)
+    with pytest.raises(DemoFailure):
+        d.run_oversight("admin-secret")
+
+
+def test_demo_cli_runs_both_acts(capsys):
+    assert demo.main([]) == 0
+    out = capsys.readouterr().out
+    assert "All demo checks passed." in out and "Recursive oversight checks passed." in out

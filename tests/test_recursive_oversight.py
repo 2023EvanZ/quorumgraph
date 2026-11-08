@@ -187,3 +187,29 @@ def test_graph_links_promoted_validators_to_their_agent_and_agent_view_explains_
     d = client.get(f"/agents/{child['id']}").json()
     assert d["status"] == "pending" and d["needs_independent"] is True
     assert client.get("/operator/me", headers=ADMIN).json()["lineage_guard"] == "soft"
+
+
+def test_block_guard_also_refuses_a_descendant_endorsing_its_ancestor():
+    _, client, tokens = _setup()
+    parent = _trusted(client, tokens, "parent")
+    child = _trusted(client, tokens, "child", parent=parent)
+    v = _promote(client, child)
+    sibling = register(client, "sibling", parent["id"], parent["token"])
+    assert endorse(client, parent["id"], v["token"]).status_code == 403  # child's validator → its own parent
+    assert endorse(client, sibling["id"], v["token"]).status_code == 201  # siblings are not kin (direct line only)
+
+
+def test_soft_guard_descendant_validators_are_not_independent():
+    _, client, tokens = _setup(lineage_guard="soft")
+    root = register(client, "root")
+    child = register(client, "child", root["id"], root["token"])
+    endorse(client, child["id"], tokens["validator-a"])
+    endorse(client, child["id"], tokens["validator-b"])
+    v = _promote(client, child)
+    endorse(client, root["id"], v["token"])
+    v2 = _promote(client, _trusted(client, tokens, "grandchild", parent=child))
+    r = endorse(client, root["id"], v2["token"])
+    assert r.json()["agent_status"] == "pending"  # two descendant validators: kin-only quorum
+    assert client.get(f"/agents/{root['id']}").json()["needs_independent"] is True
+    r = endorse(client, root["id"], tokens["validator-a"])
+    assert r.json()["agent_status"] == "trusted"  # one independent seeded endorser

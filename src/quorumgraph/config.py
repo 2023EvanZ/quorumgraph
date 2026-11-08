@@ -37,7 +37,7 @@ def parse_lineage_guard(value) -> str:
     raise ValueError(f"lineage guard must be one of {LINEAGE_GUARD_MODES}, got {value!r}")
 
 
-LINEAGE_GUARD = parse_lineage_guard(os.getenv("QG_LINEAGE_GUARD", "block").lower())
+LINEAGE_GUARD = parse_lineage_guard(os.getenv("QG_LINEAGE_GUARD", "soft").lower())
 
 # A failed spot check is one revocation vote. With escalation on (default), the
 # service also assigns a confirmation check to a second validator (not the first
