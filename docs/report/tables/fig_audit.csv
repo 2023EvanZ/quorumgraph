@@ -1,0 +1,22 @@
+cost,world,design,k,n
+0.5,revoke_only,agents,111,120
+0.5,revoke_only,"agents, lineage-weighted",115,120
+0.5,revoke_only,actions (gateway),32,120
+0.5,revoke_only,actions (simulated),33,120
+0.5,gated,agents,37,120
+0.5,gated,"agents, lineage-weighted",39,120
+0.5,gated,actions (gateway),5,120
+0.5,gated,actions (simulated),7,120
+0.5,recursive_soft,agents,36,120
+0.5,recursive_soft,"agents, lineage-weighted",35,120
+0.5,recursive_soft,actions (gateway),6,120
+0.5,recursive_soft,actions (simulated),7,120
+0.1,revoke_only,agents,108,120
+0.1,revoke_only,actions (gateway),29,120
+0.1,revoke_only,actions (simulated),31,120
+0.1,gated,agents,15,120
+0.1,gated,actions (gateway),3,120
+0.1,gated,actions (simulated),2,120
+0.1,recursive_soft,agents,12,120
+0.1,recursive_soft,actions (gateway),2,120
+0.1,recursive_soft,actions (simulated),4,120

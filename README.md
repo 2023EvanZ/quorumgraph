@@ -42,8 +42,11 @@ seeds per setting.
    log, agents evolve to stop logging. Gating *access* on being observable reverses that:
    transparency stays at 0.56–0.89 and harm is about half that of the punish-only baseline.
 2. **Without independent audits, the gate usually fails by collapse, not capture** (finding 3 is the exception). Trust drains
-   away and defectors take over. Independent random audits fix it: at a 25% audit rate,
-   simulated audits prevented collapse in every setting tested, and 5% prevented it in most.
+   away and defectors take over. Independent random audits fix it when successors are
+   faithful or drift at random: at a 25% rate, simulated audits prevented every collapse in
+   every world with revocation up to random drift 0.2. They are not enough on their own
+   against drift that hides itself: at adversarial drift 0.4, the unguarded recursive
+   world still collapsed in 17/60 seeds.
 3. **Lineage guards only earn their keep when successors hide their drift.** When children
    are near-copies of vetted parents, or drift at random, no guard collapses least and
    blocking kin endorsements is worst (the chart above). When a drifted child is built to

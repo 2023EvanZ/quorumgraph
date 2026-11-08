@@ -8,3 +8,12 @@ __pycache__/
 *.db-shm
 .DS_Store
 runs/
+# LaTeX build files (docs/report)
+*.aux
+*.fls
+*.fdb_latexmk
+*.out
+*.log
+!docs/report/tables/numbers.log
+*.bbl
+*.blg

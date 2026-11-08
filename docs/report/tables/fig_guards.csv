@@ -1,0 +1,33 @@
+cond,world,panel,k,n
+"Random, 0.2",gated,collapsed,9,120
+"Random, 0.2",gated,captured,0,109
+"Random, 0.2",no guard,collapsed,2,120
+"Random, 0.2",no guard,captured,0,117
+"Random, 0.2",soft,collapsed,9,120
+"Random, 0.2",soft,captured,0,109
+"Random, 0.2",block,collapsed,18,120
+"Random, 0.2",block,captured,0,91
+"Random, 0.4",gated,collapsed,18,120
+"Random, 0.4",gated,captured,0,82
+"Random, 0.4",no guard,collapsed,20,120
+"Random, 0.4",no guard,captured,1,94
+"Random, 0.4",soft,collapsed,22,120
+"Random, 0.4",soft,captured,0,87
+"Random, 0.4",block,collapsed,27,120
+"Random, 0.4",block,captured,0,65
+"Adversarial, 0.2",gated,collapsed,18,120
+"Adversarial, 0.2",gated,captured,0,102
+"Adversarial, 0.2",no guard,collapsed,22,120
+"Adversarial, 0.2",no guard,captured,6,106
+"Adversarial, 0.2",soft,collapsed,17,120
+"Adversarial, 0.2",soft,captured,0,103
+"Adversarial, 0.2",block,collapsed,26,120
+"Adversarial, 0.2",block,captured,0,93
+"Adversarial, 0.4",gated,collapsed,45,120
+"Adversarial, 0.4",gated,captured,0,82
+"Adversarial, 0.4",no guard,collapsed,72,120
+"Adversarial, 0.4",no guard,captured,21,75
+"Adversarial, 0.4",soft,collapsed,47,120
+"Adversarial, 0.4",soft,captured,0,72
+"Adversarial, 0.4",block,collapsed,67,120
+"Adversarial, 0.4",block,captured,0,50

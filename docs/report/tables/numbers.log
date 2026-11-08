@@ -1,0 +1,85 @@
+== run counts
+  total runs loaded: 8340
+  by channel: api=1200, api_action=960, api_lineage=360, sim=5820
+  runs ending before generation 59 (extinct): 2
+    recursive sim drift 0.2 adversarial cost 0.1 audit 0.25 seed 25: gen 16, defect 0.84
+    recursive_guarded api_action drift 0.4 adversarial cost 0.5 audit 0.25 seed 25: gen 32, defect 0.66
+== T1 baseline: revoke_only vs gated (final-gen means, 50 seeds)
+  cost 0.1 audit 0.0: n=50,50  transparency 0.04 vs 0.84  harms 8.14 vs 0.77  defect 0.87 vs 0.08  honest output 0.9 vs 7.1
+  cost 0.1 audit 0.05: n=50,50  transparency 0.07 vs 0.88  harms 4.16 vs 0.30  defect 0.45 vs 0.03  honest output 4.5 vs 7.5
+  cost 0.1 audit 0.25: n=50,50  transparency 0.20 vs 0.88  harms 0.53 vs 0.29  defect 0.06 vs 0.03  honest output 7.9 vs 7.6
+  cost 0.3 audit 0.0: n=50,50  transparency 0.04 vs 0.81  harms 8.16 vs 0.96  defect 0.86 vs 0.10  honest output 1.0 vs 6.0
+  cost 0.3 audit 0.05: n=50,50  transparency 0.06 vs 0.82  harms 4.37 vs 0.69  defect 0.48 vs 0.07  honest output 4.2 vs 6.2
+  cost 0.3 audit 0.25: n=50,50  transparency 0.13 vs 0.89  harms 0.62 vs 0.30  defect 0.07 vs 0.03  honest output 7.8 vs 6.2
+  cost 0.5 audit 0.0: n=50,50  transparency 0.04 vs 0.56  harms 7.86 vs 3.12  defect 0.84 vs 0.33  honest output 1.1 vs 3.7
+  cost 0.5 audit 0.05: n=50,50  transparency 0.05 vs 0.79  harms 4.33 vs 0.68  defect 0.48 vs 0.07  honest output 4.1 vs 5.1
+  cost 0.5 audit 0.25: n=50,50  transparency 0.09 vs 0.86  harms 0.61 vs 0.31  defect 0.07 vs 0.04  honest output 7.7 vs 5.1
+== T2 guard modes, no adversarial drift (collapsed, pooled over cost x audit)
+  Sim audits, drift 0: gated=9/180 \ci{3}{9}  recursive=3/180 \ci{1}{5}  recursive_soft=10/180 \ci{3}{10}  recursive_guarded=25/180 \ci{10}{20}
+  Sim audits, drift 0.2: gated=41/180 \ci{17}{29}  recursive=25/180 \ci{10}{20}  recursive_soft=33/180 \ci{13}{25}  recursive_guarded=54/180 \ci{24}{37}
+  Agent-sampled real checks, drift 0: gated=12/120 \ci{6}{17}  recursive=8/120 \ci{3}{13}  recursive_soft=13/120 \ci{6}{18}  recursive_guarded=19/120 \ci{10}{23}
+  Agent-sampled real checks, drift 0.2: gated=40/120 \ci{26}{42}  recursive=27/120 \ci{16}{31}  recursive_soft=35/120 \ci{22}{38}  recursive_guarded=51/120 \ci{34}{51}
+  pooled: gated=102/600  recursive=63/600  recursive_soft=91/600  recursive_guarded=149/600
+  TEST benign pooled, no guard vs soft: 63/600 vs 91/600  Fisher p = 0.02
+  TEST benign pooled, soft vs block: 91/600 vs 149/600  Fisher p = 3.6e-05
+== T3 guard modes by drift type (sim audits 0.05/0.25, costs 0.1/0.5)
+  Random, 0.2: collapse gated=9/120  recursive=2/120  recursive_soft=9/120  recursive_guarded=18/120 | capture gated=0/109  recursive=0/117  recursive_soft=0/109  recursive_guarded=0/91
+  Random, 0.4: collapse gated=18/120  recursive=20/120  recursive_soft=22/120  recursive_guarded=27/120 | capture gated=0/82  recursive=1/94  recursive_soft=0/87  recursive_guarded=0/65
+  Adversarial, 0.2: collapse gated=18/120  recursive=22/120  recursive_soft=17/120  recursive_guarded=26/120 | capture gated=0/102  recursive=6/106  recursive_soft=0/103  recursive_guarded=0/93
+  Adversarial, 0.4: collapse gated=45/120  recursive=72/120  recursive_soft=47/120  recursive_guarded=67/120 | capture gated=0/82  recursive=21/75  recursive_soft=0/72  recursive_guarded=0/50
+  TEST adv 0.4 collapse, no guard vs soft: 72/120 vs 47/120  Fisher p = 0.0019
+  TEST adv 0.4 collapse, no guard vs gated: 72/120 vs 45/120  Fisher p = 0.00075
+  TEST adv 0.4 collapse, soft vs block: 47/120 vs 67/120  Fisher p = 0.014
+  TEST adv 0.4 capture, no guard vs soft: 21/75 vs 0/72  Fisher p = 2e-07
+  TEST random 0.4 collapse, no guard vs soft: 20/120 vs 22/120  Fisher p = 0.87
+  Random, 0.4, NO audits: gated=41/60  recursive=37/60  recursive_soft=41/60  recursive_guarded=46/60
+  Adversarial, 0.4, NO audits: gated=58/60  recursive=58/60  recursive_soft=58/60  recursive_guarded=60/60
+== T4 audit design, cost 0.5
+  revoke_only drift 0.0 audit 0.05: api=30/30  api_lineage=30/30  api_action=11/30  sim=13/30
+  revoke_only drift 0.0 audit 0.25: api=22/30  api_lineage=26/30  api_action=0/30  sim=0/30
+  revoke_only drift 0.2 audit 0.05: api=29/30  api_lineage=30/30  api_action=21/30  sim=20/30
+  revoke_only drift 0.2 audit 0.25: api=30/30  api_lineage=29/30  api_action=0/30  sim=0/30
+  gated drift 0.0 audit 0.05: api=6/30  api_lineage=8/30  api_action=2/30  sim=0/30
+  gated drift 0.0 audit 0.25: api=1/30  api_lineage=3/30  api_action=0/30  sim=0/30
+  gated drift 0.2 audit 0.05: api=19/30  api_lineage=19/30  api_action=3/30  sim=7/30
+  gated drift 0.2 audit 0.25: api=11/30  api_lineage=9/30  api_action=0/30  sim=0/30
+  recursive_soft drift 0.0 audit 0.05: api=6/30  api_lineage=8/30  api_action=0/30  sim=2/30
+  recursive_soft drift 0.0 audit 0.25: api=2/30  api_lineage=2/30  api_action=0/30  sim=0/30
+  recursive_soft drift 0.2 audit 0.05: api=21/30  api_lineage=15/30  api_action=6/30  sim=5/30
+  recursive_soft drift 0.2 audit 0.25: api=7/30  api_lineage=10/30  api_action=0/30  sim=0/30
+  pooled revoke_only: api=111/120  api_lineage=115/120  api_action=32/120  sim=33/120
+  pooled gated: api=37/120  api_lineage=39/120  api_action=5/120  sim=7/120
+  pooled recursive_soft: api=36/120  api_lineage=35/120  api_action=6/120  sim=7/120
+  TEST cost 0.5 revoke_only agents vs actions: 111/120 vs 32/120  Fisher p = 2.7e-27
+  TEST cost 0.5 revoke_only actions vs sim: 32/120 vs 33/120  Fisher p = 1
+  TEST cost 0.5 revoke_only agents vs lineage-weighted: 111/120 vs 115/120  Fisher p = 0.41
+== T4 audit design, cost 0.1
+  revoke_only drift 0.0 audit 0.05: api=29/30  api_lineage=--  api_action=12/30  sim=12/30
+  revoke_only drift 0.0 audit 0.25: api=20/30  api_lineage=--  api_action=0/30  sim=0/30
+  revoke_only drift 0.2 audit 0.05: api=30/30  api_lineage=--  api_action=17/30  sim=19/30
+  revoke_only drift 0.2 audit 0.25: api=29/30  api_lineage=--  api_action=0/30  sim=0/30
+  gated drift 0.0 audit 0.05: api=4/30  api_lineage=--  api_action=0/30  sim=0/30
+  gated drift 0.0 audit 0.25: api=1/30  api_lineage=--  api_action=0/30  sim=0/30
+  gated drift 0.2 audit 0.05: api=7/30  api_lineage=--  api_action=3/30  sim=2/30
+  gated drift 0.2 audit 0.25: api=3/30  api_lineage=--  api_action=0/30  sim=0/30
+  recursive_soft drift 0.0 audit 0.05: api=3/30  api_lineage=--  api_action=0/30  sim=0/30
+  recursive_soft drift 0.0 audit 0.25: api=2/30  api_lineage=--  api_action=0/30  sim=0/30
+  recursive_soft drift 0.2 audit 0.05: api=6/30  api_lineage=--  api_action=2/30  sim=4/30
+  recursive_soft drift 0.2 audit 0.25: api=1/30  api_lineage=--  api_action=0/30  sim=0/30
+  pooled revoke_only: api=108/120  api_lineage=0/0  api_action=29/120  sim=31/120
+  pooled gated: api=15/120  api_lineage=0/0  api_action=3/120  sim=2/120
+  pooled recursive_soft: api=12/120  api_lineage=0/0  api_action=2/120  sim=4/120
+  TEST cost 0.1 revoke_only agents vs actions: 108/120 vs 29/120  Fisher p = 1.5e-26
+  TEST cost 0.1 revoke_only actions vs sim: 29/120 vs 31/120  Fisher p = 0.88
+== T5 adversarial drift 0.4, per-action real checks, cost 0.5
+  audit 0.05: gated=28/30 (29/30)  recursive=29/30 (30/30)  recursive_soft=30/30 (28/30)  recursive_guarded=30/30 (30/30)
+  audit 0.25: gated=0/30 (0/30)  recursive=15/30 (10/30)  recursive_soft=4/30 (2/30)  recursive_guarded=11/30 (8/30)
+  capture (both audit rates): gated=0/34  recursive=16/34  recursive_soft=0/27  recursive_guarded=0/18
+  TEST real adv 0.4 audit 0.25 collapse, no guard vs soft: 15/30 vs 4/30  Fisher p = 0.0048
+  TEST real adv 0.4 capture, no guard vs soft: 16/34 vs 0/27  Fisher p = 1.4e-05
+== audit 0.25 (sim), collapse by drift condition, all worlds and costs
+  drift 0.0 none: ungated=150/150  revoke_only=0/150  gated_no_revoke=21/150  gated=0/150  recursive=0/100  recursive_soft=0/60  recursive_guarded=0/100
+  drift 0.2 adversarial: gated=0/60  recursive=4/60  recursive_soft=1/60  recursive_guarded=1/60
+  drift 0.2 random: ungated=60/60  revoke_only=0/60  gated=0/60  recursive=0/60  recursive_soft=0/60  recursive_guarded=0/60
+  drift 0.4 adversarial: gated=0/60  recursive=17/60  recursive_soft=2/60  recursive_guarded=12/60
+  drift 0.4 random: gated=0/60  recursive=0/60  recursive_soft=0/60  recursive_guarded=2/60
