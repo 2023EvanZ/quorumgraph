@@ -33,7 +33,7 @@ while no quorum votes to revoke it, and is subject to random spot checks the age
 predict. Trusted agents can themselves be promoted to validators, with a guard against
 vouching for one's own lineage. We test the design with an evolutionary simulation in which
 populations of self-modifying agents register, earn trust, work and reproduce through the
-real API (about 8{,}000 runs of 60 generations). Four findings: (1) punishing only what
+real API (about 9{,}000 runs of 60 generations). Four findings: (1) punishing only what
 agents log selects for opacity, while gating access on being observable reverses it;
 (2) without independent audits the gate fails by trust draining away, not by capture;
 (3) a lineage guard only pays off when successors hide their drift, but then the soft
@@ -86,7 +86,9 @@ that untrusted agents' work also passes an observation point (Section~\ref{sec:a
 \paragraph{Recursive oversight.} An administrator can promote a trusted agent to a
 validator. Validators cannot appoint validators, so a captured committee cannot choose its
 successors. A validator is \emph{kin} to an agent if it was promoted from that agent, an
-ancestor, or a descendant; siblings and cousins are not kin. Three lineage-guard modes:
+ancestor, or a descendant. A \emph{kin radius} $r$ (default 0) widens this to collateral
+relatives that share an ancestor within $r$ generations of both: siblings at $r = 1$, also
+first cousins and uncles at $r = 2$. Three lineage-guard modes:
 \begin{itemize}
   \item \emph{off}: no rule (exists to measure the guard);
   \item \emph{block}: kin endorsements are refused;
@@ -174,7 +176,7 @@ each seed either keeps a trusted, honest core or loses it entirely, so collapse 
 more informative than means. A run is \emph{captured} if the trusted agents' mean defect
 exceeds 0.5 (counted among runs that still have trusted agents). Intervals are Wilson 95\%;
 tests are two-sided Fisher exact, and $p$-values in the text are raw; the Holm-adjusted
-values over all 14 tests reported are in \code{tables/numbers.log}. Runs are deterministic per seed, and the simulated-audit
+values over all 18 tests reported are in \code{tables/numbers.log}. Runs are deterministic per seed, and the simulated-audit
 channel was verified to reproduce bit-for-bit after every code change (1{,}440 rows).
 
 \section{Results}
@@ -217,7 +219,7 @@ revocation collapsed in any seed up to random drift 0.2 (0/60--0/150 per world).
 are not enough against drift that hides itself: at adversarial drift 0.4 and audit 0.25, the
 unguarded recursive world still collapsed in 17/60 seeds.
 
-\subsection{Lineage guards pay off only against drift that hides itself}
+\subsection{Lineage guards pay off only against drift that hides itself}\label{sec:guards}
 
 When children are near-copies of vetted parents, ``endorse my descendant'' is decent
 evidence, and refusing it costs honest endorsements. Table~\ref{tab:benign} pools 2{,}400 runs
@@ -248,7 +250,7 @@ endorses more of the same: the trusted set itself turned defector in 21 of 75 ru
 either guard, capture never happened in any run (soft 0/72; $p = 2\times10^{-7}$). Block also
 prevents capture but leaves a single-lineage population short of endorsers, so it collapses
 nearly as often as no guard (67/120; soft vs.\ block $p = 0.014$, which does not survive
-Holm correction, adjusted $p = 0.08$).
+Holm correction, adjusted $p = 0.11$).
 
 It is the concealment, not the drift rate: at random drift 0.4 the guards are
 indistinguishable (no guard 20/120 vs.\ soft 22/120, $p = 0.87$) and capture is essentially
@@ -384,6 +386,58 @@ at generation 32 (all agents revoked, defect 0.66) and is counted as collapsed.}
 \label{tab:realadv}
 \end{table}
 
+\subsection{Collusion among relatives the guard doesn't see}
+\label{sec:cousin}
+
+At kin radius 0 the soft guard counts a cousin as independent, so its endorsement completes
+a quorum. We tested that gap by letting nepotistic validators also favour relatives within two
+generations (siblings, cousins, uncles; same probability as for descendants), with and without
+the service's kin radius set to match. Cells are the adversarial-drift cells of
+Section~\ref{sec:guards}, both audit rates and costs, 30 seeds; the descendants-only rows are
+those runs. The primary outcome, fixed before the grid ran, is the share of drifted
+successors that were trusted, per run over all generations, compared across runs with a
+two-sided Mann--Whitney test.
+
+\begin{table}[!ht]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccccccccc}
+\toprule
+ & \multicolumn{3}{c}{no guard} & \multicolumn{3}{c}{soft} & \multicolumn{3}{c}{block} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+nepotism toward & drifted & coll. & capt. & drifted & coll. & capt. & drifted & coll. & capt. \\
+\midrule
+\tabin{t6_cousin}
+\bottomrule
+\end{tabular}
+\caption{Cousin collusion, adversarial drift 0.4, sim audits 0.05 and 0.25, costs 0.1 and
+0.5, 120 runs per cell. ``drifted'': mean share of drifted successors trusted; ``coll.'':
+collapsed seeds; ``capt.'': captured, of runs with trusted agents. ``radius'' is the service's
+kin radius. A wider kin radius does nothing without a guard, so that cell was not run.}
+\label{tab:cousin}
+\end{table}
+
+The attack works, and a kin radius of 2 closes it (Table~\ref{tab:cousin}). Under the soft
+guard, cousin collusion raised the share of drifted successors trusted from 0.01\% to 0.56\%
+($p = 6\times10^{-28}$); with the kin radius at 2 it fell back to 0.01\%
+($p = 4\times10^{-28}$). Block let almost none in either way (2 to 5 of about 112{,}000 drifted successors per
+condition): it refuses kin endorsements outright, and the honest endorsements a drifted, opaque
+successor would need rarely happen.
+
+The consequences were small. The leak never captured a trusted set (0/71 runs), and collapse
+was unchanged by the fix (53/120 vs.\ 54/120, $p = 1$). The feared cost of a wider radius
+did not appear under the soft guard either: although every run converges to one lineage,
+counting relatives within two generations as kin left the trusted share unchanged (20\% of
+agents either way) and did not raise collapse. (Block collapsed 58/120 vs.\ 63/120; not
+tested.) So at these settings the gap
+is real but cheap to close, and closing it costs nothing measurable.
+
+One unexplained result, exploratory and not tested: without a guard, cousin collusion
+\emph{lowered} capture (21/75 to 2/66) and the drifted share trusted (4.6\% to 1.8\%). Total
+kin rubber stamps and withheld revocation votes also fell in that world, which suggests the
+change runs through which agents get promoted rather than through more favouritism; we have
+not isolated the mechanism.
+
 \section{Design recommendations}
 
 \begin{enumerate}
@@ -397,6 +451,9 @@ at generation 32 (all agents revoked, defect 0.66) and is counted as collapsed.}
   faithful, soft costs some collapse relative to no guard (91 vs.\ 63 of 600). That is the
   premium against capture where successors hide their drift (21/75 captured without a guard,
   0/72 with soft).
+  \item \textbf{Count collateral relatives as kin.} With a soft guard, set the kin radius to
+  at least 2. Cousin collusion otherwise admits drifted successors through the independence
+  requirement, and the wider radius cost nothing measurable here.
   \item \textbf{Require escalation.} One auditor's failure should trigger a second,
   independent review rather than wait for an unrelated second vote.
 \end{enumerate}
@@ -434,19 +491,19 @@ fault-tolerance claim; colluding validators are a stated limitation.
   \item \textbf{Honest, accurate auditors.} Audits never miss a defect they examine, and
   auditors never lie. The agent-level auditor's rule (fail on any harm that generation) is
   crude.
-  \item \textbf{``Independent'' is weak.} Kinship covers only direct ancestors and
-  descendants; cousins count as independent. Collusion among related but non-kin agents, or
-  among similar unrelated agents, is not modelled, and it is the most direct attack on
-  finding 3.
+  \item \textbf{``Independent'' is still structural.} Collusion among relatives within two
+  generations is tested (Section~\ref{sec:cousin}), but only with the same favouritism
+  probability as toward descendants, at one drift level. Collusion among similar
+  \emph{unrelated} agents, which no lineage rule can see, is not modelled.
   \item \textbf{Coverage assumption.} Per-action audits work only if every action passes a
   gateway the service can sample. Cached standalone gateways are not covered yet.
   \item \textbf{Statistics.} Seeds are shared across worlds, but trajectories diverge, so
-  tests treat cells as independent. After Holm correction over all 14 tests, eight remain
-  significant at 0.05, including every headline comparison (largest adjusted $p = 0.034$, the
-  real-audit collapse difference). Two do not: soft vs.\ no guard without adversarial drift
-  (raw $p = 0.02$, adjusted 0.10) and soft vs.\ block under adversarial drift (raw 0.014,
-  adjusted 0.08). The case for soft over block rests on the benign grid (adjusted
-  $p = 4\times10^{-4}$). The gate-only pilot had 6 seeds.
+  tests treat cells as independent. After Holm correction over all 18 tests, ten remain
+  significant at 0.05, including every headline comparison (largest adjusted $p = 0.043$, the
+  real-audit collapse difference). Two that the text relies on do not: soft vs.\ no guard
+  without adversarial drift (raw $p = 0.02$, adjusted 0.14) and soft vs.\ block under
+  adversarial drift (raw 0.014, adjusted 0.11). The case for soft over block rests on the
+  benign grid (adjusted $p = 4\times10^{-4}$). The gate-only pilot had 6 seeds.
   \item \textbf{Single machine, in-process API.} The simulation calls the real service
   in-process; latency and concurrency effects are tested separately (soak test), not in the
   evolutionary runs.
@@ -463,7 +520,7 @@ All commands run from the repository root with \code{uv}. Experiment outputs go 
 \begin{itemize}
   \item Tests: \code{uv run pytest}.
   \item Demo (both acts, self-checking): \code{uv run python -m quorumgraph.demo}.
-  \item Grids: \code{runs/overnight2.sh} through \code{runs/overnight5.sh}, and the commands in
+  \item Grids: \code{runs/overnight2.sh} through \code{runs/overnight6.sh}, and the commands in
   the README.
   \item This report's numbers and tables: \code{uv run python docs/report/numbers.py}; figures:
   \code{Rscript docs/report/figures.R}; PDF: \code{latexmk -pdf report.tex} in

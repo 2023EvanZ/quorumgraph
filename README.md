@@ -12,7 +12,7 @@ can also copy whatever trust it was given. QuorumGraph treats trust as something
 agent **earns, and keeps only while independent observers agree**. Trust never passes
 from parent to child; scrutiny can.
 
-**What's built** (FastAPI + SQLite, 136 tests, `uv run python -m quorumgraph.demo` runs all
+**What's built** (FastAPI + SQLite, 145 tests, `uv run python -m quorumgraph.demo` runs all
 of it with asserted outcomes):
 - **Quorum trust and revocation.** Access needs 2-of-3 validator endorsements, and 2-of-3
   votes revoke it. A revoked agent can't spawn successors, and every decision is in an
@@ -311,7 +311,9 @@ can't be forged (children are registered with the parent's credential), so walki
 `parent_agent_id` is trustworthy.
 
 `QG_LINEAGE_GUARD` picks the mode. "Kin" means the validator was promoted from the
-agent itself, an ancestor, or a descendant (`trust.is_kin`); siblings and cousins are not kin.
+agent itself, an ancestor, or a descendant (`trust.is_kin`). `QG_KIN_RADIUS` (default 0)
+widens that to collateral relatives sharing an ancestor within r generations of both
+(1 = siblings, 2 = also cousins and uncles); the guard and auditor independence both use it.
 - `soft` (the default): kin endorsements are accepted and count toward quorum, but trust also
   requires **at least one active endorser who is not kin**. The rule lives in
   `trust.evaluate`, so the gateway, `/internal`, promotion and spot-check eligibility all
@@ -720,6 +722,28 @@ Updated takeaways:
    tested.** It collapsed in 0/60 seeds without adversarial drift, and in 4/30 under
    adversarial drift 0.4, where no guard collapsed in 15/30. Only the no-promotion
    baseline did better there (0/30). Its price is that the validator pool never grows.
+
+### Results: cousin collusion vs kin radius (600 new runs)
+
+At kin radius 0 the soft guard counts a cousin as independent. Grid 6 (`runs/overnight6.sh`)
+lets nepotistic validators also favour relatives within 2 generations (`--nepotism-radius 2`),
+with the service's kin radius at 0 or 2 (`--kin-radius`). Adversarial drift 0.4, sim audits
+0.05/0.25, costs 0.1/0.5, 30 seeds; the descendants-only baseline is grid 3. Primary
+outcome, fixed before the run: share of drifted successors trusted (per run, Mann-Whitney).
+
+| nepotism toward | no guard: drifted / coll. / capt. | soft | block |
+|---|---|---|---|
+| descendants only | 4.61% / 72/120 / 21/75 | 0.01% / 47/120 / 0/72 | 0.00% / 67/120 / 0/50 |
+| cousins, kin radius 0 | 1.83% / 65/120 / 2/66 | 0.56% / 53/120 / 0/71 | 0.00% / 58/120 / 0/59 |
+| cousins, kin radius 2 | not run | 0.01% / 54/120 / 0/69 | 0.00% / 63/120 / 0/49 |
+
+- **The attack is real and radius 2 closes it.** Soft: 0.01% → 0.56% drifted trusted
+  (p = 6e-28), back to 0.01% at radius 2 (p = 4e-28).
+- **But it's small.** No capture under soft (0/71), and the fix didn't change collapse
+  (53 vs 54/120). The wider radius didn't drain trust either, despite one lineage per run.
+- **Unexplained, exploratory:** without a guard, cousin nepotism *lowered* capture (21/75 →
+  2/66); kin stamps and shields also fell there. Not isolated.
+- Recommendation: with the soft guard, set `QG_KIN_RADIUS=2`.
 
 ## Endpoints
 

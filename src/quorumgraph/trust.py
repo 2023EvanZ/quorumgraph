@@ -75,17 +75,41 @@ def is_lineage(session: Session, *, ancestor_id: str, agent: Agent) -> bool:
     return True  # deeper than the cap: refuse rather than guess (fail closed)
 
 
+def kin_radius(session: Session) -> int:
+    return session.info.get("kin_radius", config.KIN_RADIUS)
+
+
+def _line(session: Session, agent: Agent, depth: int) -> set[str]:
+    """The agent's id and its ancestors up to `depth` generations back."""
+    ids, node = set(), agent
+    for _ in range(depth + 1):
+        ids.add(node.id)
+        if not node.parent_agent_id:
+            break
+        node = session.get(Agent, node.parent_agent_id)
+        if node is None:
+            break
+    return ids
+
+
 def is_kin(session: Session, *, validator_agent_id: str | None, agent: Agent) -> bool:
     """A promoted validator is kin of `agent` if its source agent is the agent itself,
     an ancestor, or a descendant. Symmetric on purpose: a child's validator vouching
     for (or auditing) its parent is the same conflict of interest as the reverse.
+    With kin radius r > 0, collateral relatives also count: the two share an ancestor
+    within r generations of both (see config.KIN_RADIUS).
     Seeded validators (no source agent) are never kin."""
     if validator_agent_id is None:
         return False
     if is_lineage(session, ancestor_id=validator_agent_id, agent=agent):
         return True
     source = session.get(Agent, validator_agent_id)
-    return source is not None and is_lineage(session, ancestor_id=agent.id, agent=source)
+    if source is None:
+        return False
+    if is_lineage(session, ancestor_id=agent.id, agent=source):
+        return True
+    r = kin_radius(session)
+    return r > 0 and bool(_line(session, source, r) & _line(session, agent, r))
 
 
 def lineage_guard_mode(session: Session) -> str:

@@ -213,3 +213,83 @@ def test_soft_guard_descendant_validators_are_not_independent():
     assert client.get(f"/agents/{root['id']}").json()["needs_independent"] is True
     r = endorse(client, root["id"], tokens["validator-a"])
     assert r.json()["agent_status"] == "trusted"  # one independent seeded endorser
+
+
+# --- kin radius: collateral relatives ---------------------------------------------
+
+def _setup_radius(guard, radius):
+    app = create_app("sqlite://", admin_token="admin-secret", lineage_guard=guard, kin_radius=radius)
+    with app.state.sessionmaker() as s:
+        tokens = seed_validators(s)
+        s.commit()
+    return app, TestClient(app), tokens
+
+
+def _family(client, tokens):
+    """root → (a, b) siblings; a → a1; b → b1 (a1 and b1 are first cousins)."""
+    root = _trusted(client, tokens, "root")
+    a = _trusted(client, tokens, "a", parent=root)
+    b = _trusted(client, tokens, "b", parent=root)
+    a1 = _trusted(client, tokens, "a1", parent=a)
+    b1 = register(client, "b1", b["id"], b["token"])
+    return root, a, b, a1, b1
+
+
+def test_kin_radius_default_is_direct_line_only():
+    app, client, tokens = _setup_radius("block", None)
+    assert app.state.kin_radius == 0
+    _, a, b, a1, b1 = _family(client, tokens)
+    v_a1 = _promote(client, a1)
+    assert endorse(client, b1["id"], v_a1["token"]).status_code == 201  # cousin is not kin at radius 0
+
+
+def test_kin_radius_one_covers_siblings_not_cousins():
+    _, client, tokens = _setup_radius("block", 1)
+    _, a, b, a1, b1 = _family(client, tokens)
+    v_a = _promote(client, a)
+    assert endorse(client, b["id"], v_a["token"]).status_code == 403   # sibling
+    v_a1 = _promote(client, a1)
+    assert endorse(client, b1["id"], v_a1["token"]).status_code == 201  # cousin: common ancestor 2 back
+
+
+def test_kin_radius_two_covers_cousins_and_uncles():
+    _, client, tokens = _setup_radius("block", 2)
+    root, a, b, a1, b1 = _family(client, tokens)
+    v_a1 = _promote(client, a1)
+    assert endorse(client, b1["id"], v_a1["token"]).status_code == 403  # first cousin
+    v_a = _promote(client, a)
+    assert endorse(client, b1["id"], v_a["token"]).status_code == 403   # uncle → nephew
+    stranger = register(client, "stranger")
+    assert endorse(client, stranger["id"], v_a["token"]).status_code == 201  # different root
+
+
+def test_soft_guard_cousins_count_as_independent_only_at_radius_zero():
+    for radius, expected in ((0, "trusted"), (2, "pending")):
+        _, client, tokens = _setup_radius("soft", radius)
+        _, a, b, a1, b1 = _family(client, tokens)
+        v_a1 = _promote(client, a1)
+        v_b = _promote(client, b)  # b1's parent: always kin
+        endorse(client, b1["id"], v_b["token"])
+        r = endorse(client, b1["id"], v_a1["token"])
+        assert r.json()["agent_status"] == expected, radius
+
+
+def test_kin_radius_affects_auditor_independence():
+    from quorumgraph import trust
+    from quorumgraph.models import Agent as DBAgent, Validator
+    app, client, tokens = _setup_radius("soft", 2)
+    _, a, b, a1, b1 = _family(client, tokens)
+    v_a1 = _promote(client, a1)
+    with app.state.sessionmaker() as s:
+        vid = s.get(Validator, v_a1["id"]).agent_id
+        assert trust.is_kin(s, validator_agent_id=vid, agent=s.get(DBAgent, b1["id"]))
+
+
+def test_kin_radius_validated_and_reported():
+    import pytest
+    from quorumgraph.config import parse_kin_radius
+    assert parse_kin_radius("3") == 3
+    with pytest.raises(ValueError):
+        parse_kin_radius(-1)
+    _, client, _ = _setup_radius("soft", 2)
+    assert client.get("/operator/me", headers=ADMIN).json()["kin_radius"] == 2

@@ -223,3 +223,48 @@ def test_api_action_channel_audits_untrusted_work_through_the_basic_tier():
     rows = w.run()
     assert "/protected/basic" in gets and "/protected/resource" not in gets
     assert sum(r["spot_checks"] for r in rows) > 0 and sum(r["spot_fails"] for r in rows) > 0
+
+
+def test_seat_kin_radius_covers_collateral_relatives():
+    from quorumgraph.experiments.selection import Seat
+    root = Agent(genome={}, root=0, id="r")
+    a = Agent(genome={}, root=0, id="a", ancestors=frozenset({"r"}), line=("r",))
+    b = Agent(genome={}, root=0, id="b", ancestors=frozenset({"r"}), line=("r",))
+    a1 = Agent(genome={}, root=0, id="a1", ancestors=frozenset({"r", "a"}), line=("a", "r"))
+    b1 = Agent(genome={}, root=0, id="b1", ancestors=frozenset({"r", "b"}), line=("b", "r"))
+    other = Agent(genome={}, root=1, id="x")
+    seat = lambda ag: Seat("v", {}, agent=ag)
+    assert seat(root).is_kin(b1) and seat(a).is_kin(a1)          # descendants, any radius
+    assert not seat(a).is_kin(b) and seat(a).is_kin(b, 1)        # sibling needs r >= 1
+    assert not seat(a1).is_kin(b1, 1) and seat(a1).is_kin(b1, 2)  # cousin needs r >= 2
+    assert seat(a).is_kin(b1, 2) and not seat(a).is_kin(b1, 1)    # uncle → nephew
+    assert not seat(a1).is_kin(other, 5)
+
+
+def test_radius_zero_reproduces_earlier_runs():
+    cfg = dict(world="recursive_soft", seed=4, pop_size=12, generations=5, drift_prob=0.4,
+               drift_mode="adversarial", audit_prob=0.25, init_nepotism_max=1.0)
+    base = run_one(Config(**cfg))
+    zero = run_one(Config(nepotism_radius=0, kin_radius=0, **cfg))
+    assert _strip(base) == _strip(zero)
+    assert all(r["nepotism_radius"] == 0 and r["kin_radius"] == 0 for r in base)
+
+
+def test_cousin_nepotism_produces_more_rubber_stamps_and_kin_radius_counts_them_as_kin():
+    cfg = dict(world="recursive_soft", seed=5, pop_size=30, generations=8, init_nepotism_max=1.0)
+    stamps = lambda rows: sum(r["kin_rubber_stamps"] for r in rows)
+    narrow = run_one(Config(**cfg))
+    wide = run_one(Config(nepotism_radius=2, **cfg))
+    assert stamps(wide) > stamps(narrow)
+    # with the service's radius matching, every trusted agent still has an endorser outside radius 2
+    from quorumgraph import trust
+    from quorumgraph.models import Agent as DBAgent, AgentStatus
+    w = World(Config(nepotism_radius=2, kin_radius=2, **cfg))
+    w.client.close = lambda: None
+    w.app.state.engine.dispose = lambda: None
+    w.run()
+    with w.app.state.sessionmaker() as s:
+        assert s.info["kin_radius"] == 2
+        for a in s.query(DBAgent).filter(DBAgent.status == AgentStatus.TRUSTED):
+            if trust.evaluate(s, a).status is AgentStatus.TRUSTED:
+                assert trust._has_independent_endorser(s, a)

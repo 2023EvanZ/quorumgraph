@@ -19,6 +19,7 @@ def whoami(request: Request, operator_id: str = Depends(get_operator)) -> dict:
     plus the oversight policy in force (so the UI can explain decisions)."""
     return {"operator_id": operator_id, "kind": "admin" if operator_id == "admin" else "validator",
             "lineage_guard": request.app.state.lineage_guard,
+            "kin_radius": request.app.state.kin_radius,
             "spot_check_escalation": request.app.state.spot_check_escalation}
 
 

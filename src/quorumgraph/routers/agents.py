@@ -147,7 +147,7 @@ def endorse_agent(
         audit.record(session, audit.LINEAGE_ENDORSEMENT_BLOCKED, actor_id=validator.id, agent_id=agent.id,
                      validator_agent_id=validator.agent_id)
         session.commit()
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "validators may not endorse their own lineage (self, ancestors or descendants)")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "validators may not endorse their own kin (self, ancestors, descendants, or relatives within the kin radius)")
 
     session.add(Endorsement(validator_id=validator.id, agent_id=agent.id))
     try:

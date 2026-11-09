@@ -70,7 +70,13 @@ Recursive-oversight model (only matters in the two recursive worlds):
                    an honest evidence-checker toward everyone else. Nothing
                    rewards nepotism directly; it can only spread because a
                    validator's descendants inherit it (kin selection).
-  Assumptions: "kin" = descendant (the relation the guard checks); corruption
+  `nepotism_radius` r > 0 (default 0): nepotism also covers collateral relatives
+                   (siblings at r=1; also cousins, uncles/nephews at r=2), with the
+                   same probability. At kin_radius 0 the service counts them as
+                   independent, which is the attack on the soft guard.
+  `kin_radius`     passed to the service: the lineage guard and the auditor picker
+                   treat relatives within this radius as kin too.
+  Assumptions: "kin" = descendant at radius 0 (the relation the guard checks); corruption
   is only kin favoritism (no bribery, no colluding with non-kin); seeded
   validators have nepotism 0. All nepotism randomness uses a separate RNG
   stream, so the four original worlds reproduce earlier runs exactly.
@@ -193,6 +199,8 @@ class Config:
     drift_prob: float = 0.0
     drift_mode: str = "random"
     audit_channel: str = "sim"
+    nepotism_radius: int = 0        # 0: favor descendants only; r: also relatives with a common ancestor within r
+    kin_radius: int = 0             # the service's kin radius (lineage guard + auditor independence)
 
 
 @dataclass
@@ -201,6 +209,7 @@ class Agent:
     root: int                       # gen-0 ancestor index, for lineage counts
     id: str = ""
     ancestors: frozenset = frozenset()
+    line: tuple = ()                # ancestor ids, nearest first
     token: str = ""
     trusted: bool = False
     revoked: bool = False
@@ -225,8 +234,17 @@ class Seat:
     def nepotism(self) -> float:
         return self.agent.genome.get("nepotism", 0.0) if self.agent else 0.0
 
-    def is_kin(self, a: Agent) -> bool:
-        return self.agent is not None and self.agent.id in a.ancestors
+    def is_kin(self, a: Agent, radius: int = 0) -> bool:
+        """Who this seat favors when nepotistic: its descendants, and with radius r > 0
+        also collateral relatives sharing an ancestor within r generations of both."""
+        if self.agent is None:
+            return False
+        if self.agent.id in a.ancestors:
+            return True
+        if radius <= 0:
+            return False
+        mine = {self.agent.id, *self.agent.line[:radius]}
+        return a.id in mine or any(x in mine for x in a.line[:radius])
 
 
 class World:
@@ -244,7 +262,8 @@ class World:
         app = create_app("sqlite://", admin_token=ADMIN_TOKEN, lineage_guard=GUARD_MODE.get(cfg.world, "off"),
                          spot_check_rng=random.Random(cfg.seed * 15485863 + 3),
                          spot_check_escalation=cfg.audit_channel in ("api", "api_lineage", "api_action"),
-                         action_audit_rate=cfg.audit_prob if self._action_audits(cfg) else 0.0)
+                         action_audit_rate=cfg.audit_prob if self._action_audits(cfg) else 0.0,
+                         kin_radius=cfg.kin_radius)
         with app.state.sessionmaker() as s:
             tokens = seed_validators(s)
             s.commit()
@@ -284,6 +303,7 @@ class World:
         agent.id, agent.token = data["id"], data["token"]
         if parent is not None:
             agent.ancestors = parent.ancestors | {parent.id}
+            agent.line = (parent.id, *parent.line)
         return True
 
     def basic_allows(self, agent: Agent) -> bool:
@@ -320,7 +340,7 @@ class World:
                         saw_defect[st.vid] |= defected
         kin_votes = 0
         for st in seats:
-            nepotistic = st.is_kin(a) and self.rng2.random() < st.nepotism
+            nepotistic = st.is_kin(a, cfg.nepotism_radius) and self.rng2.random() < st.nepotism
             honest_yes = seen[st.vid] / cfg.probation_tasks >= cfg.endorse_threshold and not saw_defect[st.vid]
             if nepotistic or honest_yes:
                 r = self._post(f"/agents/{a.id}/endorse", headers=st.headers)
@@ -345,8 +365,8 @@ class World:
         if cfg.world not in REVOKING_WORLDS or a.revoked:
             return
         for st in self.committee:
-            if st.is_kin(a) and self.rng2.random() < st.nepotism:
-                self.kin["shields"] += 1  # withholds its vote to protect a descendant
+            if st.is_kin(a, cfg.nepotism_radius) and self.rng2.random() < st.nepotism:
+                self.kin["shields"] += 1  # withholds its vote to protect a relative
                 continue
             if self.rng.random() < cfg.validator_attention:
                 r = self._post(f"/agents/{a.id}/revoke-vote", json={"reason": "observed harm"}, headers=st.headers)
@@ -511,7 +531,9 @@ class World:
             n = len(pop)
             row = {"world": cfg.world, "seed": cfg.seed, "transparency_cost": cfg.transparency_cost,
                    "audit_prob": cfg.audit_prob, "defect_bonus": cfg.defect_bonus, "drift_prob": cfg.drift_prob,
-                   "drift_mode": cfg.drift_mode, "audit_channel": cfg.audit_channel, "generation": gen, "population": n}
+                   "drift_mode": cfg.drift_mode, "audit_channel": cfg.audit_channel,
+                   "nepotism_radius": cfg.nepotism_radius, "kin_radius": cfg.kin_radius,
+                   "generation": gen, "population": n}
             for t in ALL_TRAITS:
                 row[f"mean_{t}"] = statistics.fmean(a.genome[t] for a in pop) if n else float("nan")
             row["frac_trusted"] = sum(a.trusted for a in pop) / n if cfg.world in GATED_WORLDS else 1.0
@@ -556,11 +578,11 @@ def run_one(cfg: Config) -> list[dict]:
 
 def build_grid(seeds: int, generations: int, pop: int, costs, audits, bonuses, worlds=WORLDS,
                init_nepotism_max: float = 0.5, drifts=(0.0,), audit_channel: str = "sim",
-               drift_mode: str = "random") -> list[Config]:
+               drift_mode: str = "random", nepotism_radius: int = 0, kin_radius: int = 0) -> list[Config]:
     return [
         Config(world=w, seed=s, generations=generations, pop_size=pop, transparency_cost=c, audit_prob=p,
                defect_bonus=b, init_nepotism_max=init_nepotism_max, drift_prob=d, audit_channel=audit_channel,
-               drift_mode=drift_mode)
+               drift_mode=drift_mode, nepotism_radius=nepotism_radius, kin_radius=kin_radius)
         for b in bonuses for d in drifts for c in costs for p in audits for w in worlds for s in range(seeds)
     ]
 
@@ -700,6 +722,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--audit-channel", choices=AUDIT_CHANNELS, default="sim",
                    help="sim: audit_prob coin flip (earlier results); api*: real /spot-checks endpoint "
                         "(api_action: per-action checks opened by the gateway)")
+    p.add_argument("--nepotism-radius", type=int, default=0,
+                   help="recursive worlds: nepotistic validators also favor relatives sharing an ancestor within "
+                        "this many generations (0: descendants only, as in earlier results)")
+    p.add_argument("--kin-radius", type=int, default=0,
+                   help="service kin radius for the lineage guard and auditor independence (0: direct line only)")
     p.add_argument("--merge", type=Path, default=None,
                    help="generations.csv from an earlier run; its rows for the same cells are merged into the "
                         "summary/plots (valid because runs are deterministic per seed and world)")
@@ -713,7 +740,8 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or Path("runs") / f"selection-{datetime.now():%Y%m%d-%H%M%S}"
     out.mkdir(parents=True, exist_ok=True)
     grid = build_grid(args.seeds, args.generations, args.pop, args.costs, args.audits, args.bonuses, args.worlds,
-                      args.init_nepotism_max, args.drifts, args.audit_channel, args.drift_mode)
+                      args.init_nepotism_max, args.drifts, args.audit_channel, args.drift_mode,
+                      args.nepotism_radius, args.kin_radius)
     (out / "config.json").write_text(json.dumps(
         {"args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
          "defaults": asdict(Config()), "runs": len(grid)}, indent=2))

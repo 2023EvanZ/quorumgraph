@@ -28,6 +28,7 @@ def create_app(
     spot_check_rng: random.Random | None = None,
     spot_check_escalation: bool | None = None,
     action_audit_rate: float | None = None,
+    kin_radius: int | None = None,
 ) -> FastAPI:
     engine = make_engine(database_url or config.DATABASE_URL)
     Base.metadata.create_all(engine)  # MVP: no migrations; delete the .db file to reset
@@ -36,8 +37,10 @@ def create_app(
     app = FastAPI(title="QuorumGraph", version="0.1.0")
     app.state.engine = engine
     guard = config.LINEAGE_GUARD if lineage_guard is None else config.parse_lineage_guard(lineage_guard)
-    # The guard mode rides on every session so trust.evaluate applies it everywhere.
-    app.state.sessionmaker = sessionmaker(engine, expire_on_commit=False, info={"lineage_guard": guard})
+    radius = config.KIN_RADIUS if kin_radius is None else config.parse_kin_radius(kin_radius)
+    # The guard mode and kin radius ride on every session so trust applies them everywhere.
+    app.state.sessionmaker = sessionmaker(engine, expire_on_commit=False,
+                                          info={"lineage_guard": guard, "kin_radius": radius})
     app.state.gateway_secret = gateway_secret if gateway_secret is not None else config.GATEWAY_SECRET
     app.state.admin_token = admin_token  # None: fall back to config.ADMIN_TOKEN per request
     # Who gets spot-checked must be unpredictable to agents and validators alike.
@@ -50,6 +53,7 @@ def create_app(
         raise ValueError(f"action audit rate must be in [0, 1], got {rate}")
     app.state.action_audit_rate = rate
     app.state.lineage_guard = guard  # "off" | "block" | "soft"
+    app.state.kin_radius = radius
     app.state.event_poll_interval = (
         event_poll_interval if event_poll_interval is not None else config.EVENT_POLL_INTERVAL
     )

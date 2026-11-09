@@ -39,6 +39,22 @@ def parse_lineage_guard(value) -> str:
 
 LINEAGE_GUARD = parse_lineage_guard(os.getenv("QG_LINEAGE_GUARD", "soft").lower())
 
+
+def parse_kin_radius(value) -> int:
+    r = int(value)
+    if r < 0:
+        raise ValueError(f"kin radius must be >= 0, got {value!r}")
+    return r
+
+
+# Who counts as kin for the lineage guard and for picking independent auditors.
+#   0 (default): direct line only (self, ancestors, descendants).
+#   r > 0: also collateral relatives whose nearest common ancestor is within r
+#          generations of both (1 = siblings, 2 = also first cousins, uncles/nephews).
+# Wider is safer against collusion among relatives, but in a population descended from
+# few roots it also makes most promoted validators count as kin.
+KIN_RADIUS = parse_kin_radius(os.getenv("QG_KIN_RADIUS", "0"))
+
 # A failed spot check is one revocation vote. With escalation on (default), the
 # service also assigns a confirmation check to a second validator (not the first
 # auditor, not the agent's kin; endorsers allowed, since confirming a failure goes

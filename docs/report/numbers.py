@@ -24,7 +24,7 @@ OUT = Path(__file__).resolve().parent / "tables"
 
 FILES = ["selection-baseline", "selection-recursive", "selection-drift0", "selection-drift02", "selection-api",
          "selection-adversarial", "selection-drift04", "selection-api-lineage", "selection-api-action",
-         "selection-api-action-adv", "selection-api-action-c01"]
+         "selection-api-action-adv", "selection-api-action-c01", "selection-cousin-k0", "selection-cousin-k2"]
 
 GUARDS = [("gated", "gated"), ("recursive", "no guard"), ("recursive_soft", "soft"), ("recursive_guarded", "block")]
 
@@ -58,6 +58,7 @@ def fisher(k1: int, n1: int, k2: int, n2: int) -> float:
 
 def load() -> list[dict]:
     last: dict[tuple, dict] = {}
+    drifted: dict[tuple, list[float]] = {}
     for name in FILES:
         path = RUNS / name / "generations.csv"
         if not path.exists():
@@ -69,17 +70,28 @@ def load() -> list[dict]:
                 mode = r.get("drift_mode") or ("random" if drift > 0 else "none")
                 if drift == 0:
                     mode = "none"
+                nep, kin = int(float(r.get("nepotism_radius") or 0)), int(float(r.get("kin_radius") or 0))
                 key = (r["world"], int(r["seed"]), float(r["transparency_cost"]), float(r["audit_prob"]),
-                       float(r["defect_bonus"]), drift, mode, r.get("audit_channel") or "sim")
+                       float(r["defect_bonus"]), drift, mode, r.get("audit_channel") or "sim", nep, kin)
                 g = int(r["generation"])
+                # drifted agents trusted, summed over every generation of the run (grid 6 primary outcome)
+                acc = drifted.setdefault(key, [0.0, 0.0])
+                if r.get("drifted_trusted") not in ("", None) and r.get("frac_drifted") not in ("", None):
+                    nd = float(r["frac_drifted"]) * int(r["population"])
+                    acc[0] += nd
+                    acc[1] += float(r["drifted_trusted"]) * nd
                 if key not in last or g > last[key]["_gen"]:
                     td = r.get("trusted_defect", "")
                     last[key] = {"world": key[0], "seed": key[1], "cost": key[2], "audit": key[3], "bonus": key[4],
-                                 "drift": drift, "mode": mode, "channel": key[7], "_gen": g,
+                                 "drift": drift, "mode": mode, "channel": key[7], "nep": nep, "kin": kin, "_gen": g,
                                  "defect": float(r["mean_defect"]), "transparency": float(r["mean_transparency"]),
                                  "harms": float(r["harms_per_agent"]),
                                  "honest": float(r["honest_successes_per_agent"]),
                                  "trusted_defect": float(td) if td not in ("", None) else None}
+    for key, r in last.items():
+        nd, nt = drifted.get(key, (0.0, 0.0))
+        r["drifted_n"], r["drifted_trusted_n"] = nd, nt
+        r["drifted_trusted"] = nt / nd if nd else None
     return list(last.values())
 
 
@@ -351,9 +363,79 @@ def run_counts(rows):
             f"seed {r['seed']}: gen {r['_gen']}, defect {r['defect']:.2f}")
 
 
+def mannwhitney(x: list[float], y: list[float]) -> float:
+    """Two-sided Mann-Whitney U, normal approximation with tie correction (n >= 30 per group here)."""
+    allv = sorted((v, g) for g, vs in ((0, x), (1, y)) for v in vs)
+    n1, n2, N = len(x), len(y), len(x) + len(y)
+    ranks, i, ties = [0.0] * N, 0, 0.0
+    while i < N:
+        j = i
+        while j + 1 < N and allv[j + 1][0] == allv[i][0]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[k] = (i + j) / 2 + 1
+        t = j - i + 1
+        ties += t ** 3 - t
+        i = j + 1
+    r1 = sum(rk for rk, (_, g) in zip(ranks, allv) if g == 0)
+    u = r1 - n1 * (n1 + 1) / 2
+    sd = math.sqrt(n1 * n2 / 12 * ((N + 1) - ties / (N * (N - 1))))
+    if sd == 0:
+        return 1.0
+    z = (abs(u - n1 * n2 / 2) - 0.5) / sd
+    return min(1.0, math.erfc(max(z, 0) / math.sqrt(2)))
+
+
+def mw_test(label, x, y):
+    p = mannwhitney(x, y)
+    log(f"  TEST {label}: mean {sum(x) / len(x):.4f} (n={len(x)}) vs {sum(y) / len(y):.4f} (n={len(y)})  "
+        f"Mann-Whitney p = {p:.2g}")
+    TESTS.append((label, p))
+    return p
+
+
+def t_cousin(rows):
+    """Grid 6: cousin collusion (nepotism radius 2) vs the service's kin radius. Adversarial drift 0.4,
+    sim audits 0.05/0.25, costs 0.1/0.5, 30 seeds. Baseline (nepotism radius 0) = grid 3, same cells.
+    Primary outcome, fixed before the run: share of drifted agents that were trusted, per run
+    (summed over all generations), compared across runs."""
+    log("== T6 cousin collusion (adversarial drift 0.4, sim audits 0.05/0.25, costs 0.1/0.5)")
+    conds = [("descendants only", 0, 0), ("cousins, radius 0", 2, 0), ("cousins, radius 2", 2, 2)]
+    worlds = [("recursive", "no guard"), ("recursive_soft", "soft"), ("recursive_guarded", "block")]
+    lines, cells = [], {}
+    for label, nep, kin in conds:
+        out = []
+        for w, _ in worlds:
+            r = sel(rows, world=w, bonus=1.0, channel="sim", drift=0.4, mode="adversarial", audit=[0.05, 0.25],
+                    cost=[0.1, 0.5], seed=lambda s: s < 30, nep=nep, kin=kin)
+            if not r:
+                out.append("\\multicolumn{3}{c}{not run}")
+                continue
+            dt = [x["drifted_trusted"] for x in r if x["drifted_trusted"] is not None]
+            cells[(label, w)] = (dt, r)
+            m = sum(dt) / len(dt) if dt else float("nan")
+            ck, cn = collapsed(r)
+            pk, pn = captured(r)
+            log(f"  {label} {w}: drifted trusted mean {m:.4f} over {len(dt)} runs; collapsed {ck}/{cn};"
+                f" captured {pk}/{pn}")
+            out.append(f"{100 * m:.2f}\\% & {kn(ck, cn, ci=False)} & {kn(pk, pn, ci=False)}")
+        lines.append(f"{label} & " + " & ".join(out) + " \\\\")
+    def pair(a, b, w, what):
+        if (a, w) in cells and (b, w) in cells:
+            mw_test(f"cousin {what} {w}: drifted trusted, {a} vs {b}", cells[(a, w)][0], cells[(b, w)][0])
+    pair("descendants only", "cousins, radius 0", "recursive_soft", "attack")
+    pair("cousins, radius 0", "cousins, radius 2", "recursive_soft", "fix")
+    pair("cousins, radius 0", "cousins, radius 2", "recursive_guarded", "fix")
+    if ("cousins, radius 0", "recursive_soft") in cells and ("cousins, radius 2", "recursive_soft") in cells:
+        test("cousin soft collapse, radius 0 vs radius 2", collapsed(cells[("cousins, radius 0", "recursive_soft")][1]),
+             collapsed(cells[("cousins, radius 2", "recursive_soft")][1]))
+    write("t6_cousin", "\n".join(lines) + "\n")
+
+
 def main():
-    rows = load()
-    run_counts(rows)
+    allrows = load()
+    run_counts(allrows)
+    rows = [r for r in allrows if r["nep"] == 0 and r["kin"] == 0]  # every table before grid 6
     t_baseline(rows)
     t_guards_benign(rows)
     t_guards_drift(rows)
@@ -361,6 +443,7 @@ def main():
     t_audit_design(rows, 0.1)
     t_real_adversarial(rows)
     t_audit25(rows)
+    t_cousin(allrows)
     log_holm()
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "numbers.log").write_text("\n".join(LOG) + "\n")

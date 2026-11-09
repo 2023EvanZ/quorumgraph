@@ -48,7 +48,7 @@ def test_dashboard_not_in_openapi(client):
 def test_operator_me(client, validators, monkeypatch):
     r = client.get("/operator/me", headers=bearer(validators["validator-b"]))
     assert r.json() == {"operator_id": "validator-b", "kind": "validator",
-                        "lineage_guard": "soft", "spot_check_escalation": True}
+                        "lineage_guard": "soft", "kin_radius": 0, "spot_check_escalation": True}
 
     from quorumgraph import config
     monkeypatch.setattr(config, "ADMIN_TOKEN", "adm")
