@@ -17,3 +17,7 @@ runs/
 !docs/report/tables/numbers.log
 *.bbl
 *.blg
+# Built report PDFs and source bundle (not committed)
+docs/report/report.pdf
+docs/report/submission/report.pdf
+docs/report/quorumgraph-report-src.zip

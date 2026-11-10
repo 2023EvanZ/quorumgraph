@@ -400,7 +400,7 @@ def t_cousin(rows):
     Primary outcome, fixed before the run: share of drifted agents that were trusted, per run
     (summed over all generations), compared across runs."""
     log("== T6 cousin collusion (adversarial drift 0.4, sim audits 0.05/0.25, costs 0.1/0.5)")
-    conds = [("descendants only", 0, 0), ("cousins, radius 0", 2, 0), ("cousins, radius 2", 2, 2)]
+    conds = [("descendants only", 0, 0), ("relatives, kin radius 0", 2, 0), ("relatives, kin radius 2", 2, 2)]
     worlds = [("recursive", "no guard"), ("recursive_soft", "soft"), ("recursive_guarded", "block")]
     lines, cells = [], {}
     for label, nep, kin in conds:
@@ -423,12 +423,12 @@ def t_cousin(rows):
     def pair(a, b, w, what):
         if (a, w) in cells and (b, w) in cells:
             mw_test(f"cousin {what} {w}: drifted trusted, {a} vs {b}", cells[(a, w)][0], cells[(b, w)][0])
-    pair("descendants only", "cousins, radius 0", "recursive_soft", "attack")
-    pair("cousins, radius 0", "cousins, radius 2", "recursive_soft", "fix")
-    pair("cousins, radius 0", "cousins, radius 2", "recursive_guarded", "fix")
-    if ("cousins, radius 0", "recursive_soft") in cells and ("cousins, radius 2", "recursive_soft") in cells:
-        test("cousin soft collapse, radius 0 vs radius 2", collapsed(cells[("cousins, radius 0", "recursive_soft")][1]),
-             collapsed(cells[("cousins, radius 2", "recursive_soft")][1]))
+    pair("descendants only", "relatives, kin radius 0", "recursive_soft", "attack")
+    pair("relatives, kin radius 0", "relatives, kin radius 2", "recursive_soft", "fix")
+    pair("relatives, kin radius 0", "relatives, kin radius 2", "recursive_guarded", "fix")
+    if ("relatives, kin radius 0", "recursive_soft") in cells and ("relatives, kin radius 2", "recursive_soft") in cells:
+        test("cousin soft collapse, radius 0 vs radius 2", collapsed(cells[("relatives, kin radius 0", "recursive_soft")][1]),
+             collapsed(cells[("relatives, kin radius 2", "recursive_soft")][1]))
     write("t6_cousin", "\n".join(lines) + "\n")
 
 

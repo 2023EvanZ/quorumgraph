@@ -734,15 +734,24 @@ outcome, fixed before the run: share of drifted successors trusted (per run, Man
 | nepotism toward | no guard: drifted / coll. / capt. | soft | block |
 |---|---|---|---|
 | descendants only | 4.61% / 72/120 / 21/75 | 0.01% / 47/120 / 0/72 | 0.00% / 67/120 / 0/50 |
-| cousins, kin radius 0 | 1.83% / 65/120 / 2/66 | 0.56% / 53/120 / 0/71 | 0.00% / 58/120 / 0/59 |
-| cousins, kin radius 2 | not run | 0.01% / 54/120 / 0/69 | 0.00% / 63/120 / 0/49 |
+| relatives (r=2), kin radius 0 | 1.83% / 65/120 / 2/66 | 0.56% / 53/120 / 0/71 | 0.00% / 58/120 / 0/59 |
+| relatives (r=2), kin radius 2 | not run | 0.01% / 54/120 / 0/69 | 0.00% / 63/120 / 0/49 |
 
 - **The attack is real and radius 2 closes it.** Soft: 0.01% → 0.56% drifted trusted
   (p = 6e-28), back to 0.01% at radius 2 (p = 4e-28).
 - **But it's small.** No capture under soft (0/71), and the fix didn't change collapse
   (53 vs 54/120). The wider radius didn't drain trust either, despite one lineage per run.
-- **Unexplained, exploratory:** without a guard, cousin nepotism *lowered* capture (21/75 →
-  2/66); kin stamps and shields also fell there. Not isolated.
+- **Scope:** generations don't overlap and seats are older than the agents they judge, so in
+  the sim "relatives within 2 generations" reaches only a seat's nephews, in its first
+  generation in office. The test covers that relation, not cousins in general.
+- **The no-guard drop in capture (21/75 → 2/66) is not protection.** Captured-or-no-trusted-agent
+  barely moved (66 vs 56/120). Instrumented reruns of cost 0.5 / audit 0.25 (30 seeds each,
+  identical to the grid) show why: a captured committee under descendants-only nepotism is a
+  dynasty (1.9 of 3 seat pairs lineal; 38% of each generation kin to two seats, enough for a
+  quorum of rubber stamps; 96% of promotions go to a seat's descendant). Favouring nephews lets
+  a non-descendant get trusted and promoted; in 6 of 10 long freezes that promotion came right
+  before it, leaving no agent kin to two seats. Nobody can then reach quorum, nobody is
+  promotable, and the committee freezes with no trusted agents (81% of takeover generations vs 7%).
 - Recommendation: with the soft guard, set `QG_KIN_RADIUS=2`.
 
 ## Endpoints

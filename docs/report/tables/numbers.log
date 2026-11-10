@@ -87,18 +87,18 @@
   descendants only recursive: drifted trusted mean 0.0461 over 120 runs; collapsed 72/120; captured 21/75
   descendants only recursive_soft: drifted trusted mean 0.0001 over 120 runs; collapsed 47/120; captured 0/72
   descendants only recursive_guarded: drifted trusted mean 0.0000 over 120 runs; collapsed 67/120; captured 0/50
-  cousins, radius 0 recursive: drifted trusted mean 0.0183 over 120 runs; collapsed 65/120; captured 2/66
-  cousins, radius 0 recursive_soft: drifted trusted mean 0.0056 over 120 runs; collapsed 53/120; captured 0/71
-  cousins, radius 0 recursive_guarded: drifted trusted mean 0.0000 over 120 runs; collapsed 58/120; captured 0/59
-  cousins, radius 2 recursive_soft: drifted trusted mean 0.0001 over 120 runs; collapsed 54/120; captured 0/69
-  cousins, radius 2 recursive_guarded: drifted trusted mean 0.0000 over 120 runs; collapsed 63/120; captured 0/49
-  TEST cousin attack recursive_soft: drifted trusted, descendants only vs cousins, radius 0: mean 0.0001 (n=120) vs 0.0056 (n=120)  Mann-Whitney p = 5.6e-28
-  TEST cousin fix recursive_soft: drifted trusted, cousins, radius 0 vs cousins, radius 2: mean 0.0056 (n=120) vs 0.0001 (n=120)  Mann-Whitney p = 4.1e-28
-  TEST cousin fix recursive_guarded: drifted trusted, cousins, radius 0 vs cousins, radius 2: mean 0.0000 (n=120) vs 0.0000 (n=120)  Mann-Whitney p = 0.4
+  relatives, kin radius 0 recursive: drifted trusted mean 0.0183 over 120 runs; collapsed 65/120; captured 2/66
+  relatives, kin radius 0 recursive_soft: drifted trusted mean 0.0056 over 120 runs; collapsed 53/120; captured 0/71
+  relatives, kin radius 0 recursive_guarded: drifted trusted mean 0.0000 over 120 runs; collapsed 58/120; captured 0/59
+  relatives, kin radius 2 recursive_soft: drifted trusted mean 0.0001 over 120 runs; collapsed 54/120; captured 0/69
+  relatives, kin radius 2 recursive_guarded: drifted trusted mean 0.0000 over 120 runs; collapsed 63/120; captured 0/49
+  TEST cousin attack recursive_soft: drifted trusted, descendants only vs relatives, kin radius 0: mean 0.0001 (n=120) vs 0.0056 (n=120)  Mann-Whitney p = 5.6e-28
+  TEST cousin fix recursive_soft: drifted trusted, relatives, kin radius 0 vs relatives, kin radius 2: mean 0.0056 (n=120) vs 0.0001 (n=120)  Mann-Whitney p = 4.1e-28
+  TEST cousin fix recursive_guarded: drifted trusted, relatives, kin radius 0 vs relatives, kin radius 2: mean 0.0000 (n=120) vs 0.0000 (n=120)  Mann-Whitney p = 0.4
   TEST cousin soft collapse, radius 0 vs radius 2: 53/120 vs 54/120  Fisher p = 1
 == Holm-adjusted p-values (family = all 18 tests above)
-  cousin fix recursive_soft: drifted trusted, cousins, radius 0 vs cousins, radius 2: raw p = 4.1e-28  Holm p = 7.3e-27  reject at 0.05
-  cousin attack recursive_soft: drifted trusted, descendants only vs cousins, radius 0: raw p = 5.6e-28  Holm p = 9.5e-27  reject at 0.05
+  cousin fix recursive_soft: drifted trusted, relatives, kin radius 0 vs relatives, kin radius 2: raw p = 4.1e-28  Holm p = 7.3e-27  reject at 0.05
+  cousin attack recursive_soft: drifted trusted, descendants only vs relatives, kin radius 0: raw p = 5.6e-28  Holm p = 9.5e-27  reject at 0.05
   cost 0.5 revoke_only agents vs actions: raw p = 2.7e-27  Holm p = 4.3e-26  reject at 0.05
   cost 0.1 revoke_only agents vs actions: raw p = 1.5e-26  Holm p = 2.2e-25  reject at 0.05
   adv 0.4 capture, no guard vs soft: raw p = 2e-07  Holm p = 2.8e-06  reject at 0.05
@@ -109,7 +109,7 @@
   real adv 0.4 audit 0.25 collapse, no guard vs soft: raw p = 0.0048  Holm p = 0.043  reject at 0.05
   adv 0.4 collapse, soft vs block: raw p = 0.014  Holm p = 0.11  n.s.
   benign pooled, no guard vs soft: raw p = 0.02  Holm p = 0.14  n.s.
-  cousin fix recursive_guarded: drifted trusted, cousins, radius 0 vs cousins, radius 2: raw p = 0.4  Holm p = 1  n.s.
+  cousin fix recursive_guarded: drifted trusted, relatives, kin radius 0 vs relatives, kin radius 2: raw p = 0.4  Holm p = 1  n.s.
   cost 0.5 revoke_only agents vs lineage-weighted: raw p = 0.41  Holm p = 1  n.s.
   random 0.4 collapse, no guard vs soft: raw p = 0.87  Holm p = 1  n.s.
   cost 0.1 revoke_only actions vs sim: raw p = 0.88  Holm p = 1  n.s.

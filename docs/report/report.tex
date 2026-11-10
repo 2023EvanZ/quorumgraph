@@ -33,7 +33,7 @@ while no quorum votes to revoke it, and is subject to random spot checks the age
 predict. Trusted agents can themselves be promoted to validators, with a guard against
 vouching for one's own lineage. We test the design with an evolutionary simulation in which
 populations of self-modifying agents register, earn trust, work and reproduce through the
-real API (about 9{,}000 runs of 60 generations). Four findings: (1) punishing only what
+real API (about 9{,}000 runs of 60 generations). Four main findings: (1) punishing only what
 agents log selects for opacity, while gating access on being observable reverses it;
 (2) without independent audits the gate fails by trust draining away, not by capture;
 (3) a lineage guard only pays off when successors hide their drift, but then the soft
@@ -41,8 +41,12 @@ variant prevents the trusted set from being captured (0/72 runs vs.\ 21/75 witho
 $p = 2\times10^{-7}$); and (4) real spot checks must sample \emph{actions}, not
 \emph{agents}: sampling agents left 111/120 seeds collapsed in the ungated world, while
 sampling actions at the gateway, through the real service, matched the idealized simulated
-audit (32/120 vs.\ 33/120; 29/120 vs.\ 31/120 at a lower transparency cost). All results come from a deliberately simple model; the
-limitations are stated in Section~\ref{sec:limits}.
+audit (32/120 vs.\ 33/120; 29/120 vs.\ 31/120 at a lower transparency cost). A fifth,
+smaller result: validators who also favour collateral relatives (in the simulation, a seat's
+nephews) leak drifted successors past the soft guard (0.01\% to 0.56\% trusted), and
+counting relatives within two generations as kin closes the leak at no measurable cost. All
+results come from a deliberately simple model; the limitations are stated in
+Section~\ref{sec:limits}.
 \end{abstract}
 
 \section{Problem}
@@ -68,7 +72,7 @@ are necessary, and which apparently reasonable mechanisms are not.
 
 \section{System}
 
-QuorumGraph is a FastAPI service backed by SQLite (136 automated tests). Agents and
+QuorumGraph is a FastAPI service backed by SQLite (145 automated tests). Agents and
 validators authenticate with bearer tokens; every state change is written to an
 append-only audit log in the same transaction.
 
@@ -389,10 +393,14 @@ at generation 32 (all agents revoked, defect 0.66) and is counted as collapsed.}
 \subsection{Collusion among relatives the guard doesn't see}
 \label{sec:cousin}
 
-At kin radius 0 the soft guard counts a cousin as independent, so its endorsement completes
+At kin radius 0 the soft guard counts collateral relatives (siblings, nephews, cousins) as independent, so its endorsement completes
 a quorum. We tested that gap by letting nepotistic validators also favour relatives within two
-generations (siblings, cousins, uncles; same probability as for descendants), with and without
-the service's kin radius set to match. Cells are the adversarial-drift cells of
+generations (same probability as for descendants), with and without the service's kin
+radius set to match. Generations do not overlap and a seat is always older than the agents it
+judges, so in the simulation this extra favouritism reaches exactly one group: the seat's
+nephews, during its first generation in office. Cousins of a seat are never alive at the same
+time as the agents it judges, so the test covers that one collateral relation, not cousins in
+general. Cells are the adversarial-drift cells of
 Section~\ref{sec:guards}, both audit rates and costs, 30 seeds; the descendants-only rows are
 those runs. The primary outcome, fixed before the grid ran, is the share of drifted
 successors that were trusted, per run over all generations, compared across runs with a
@@ -410,7 +418,8 @@ nepotism toward & drifted & coll. & capt. & drifted & coll. & capt. & drifted & 
 \tabin{t6_cousin}
 \bottomrule
 \end{tabular}
-\caption{Cousin collusion, adversarial drift 0.4, sim audits 0.05 and 0.25, costs 0.1 and
+\caption{Collusion among relatives (validators also favour relatives within two generations;
+in the simulation, a seat's nephews), adversarial drift 0.4, sim audits 0.05 and 0.25, costs 0.1 and
 0.5, 120 runs per cell. ``drifted'': mean share of drifted successors trusted; ``coll.'':
 collapsed seeds; ``capt.'': captured, of runs with trusted agents. ``radius'' is the service's
 kin radius. A wider kin radius does nothing without a guard, so that cell was not run.}
@@ -418,7 +427,7 @@ kin radius. A wider kin radius does nothing without a guard, so that cell was no
 \end{table}
 
 The attack works, and a kin radius of 2 closes it (Table~\ref{tab:cousin}). Under the soft
-guard, cousin collusion raised the share of drifted successors trusted from 0.01\% to 0.56\%
+guard, collusion among relatives raised the share of drifted successors trusted from 0.01\% to 0.56\%
 ($p = 6\times10^{-28}$); with the kin radius at 2 it fell back to 0.01\%
 ($p = 4\times10^{-28}$). Block let almost none in either way (2 to 5 of about 112{,}000 drifted successors per
 condition): it refuses kin endorsements outright, and the honest endorsements a drifted, opaque
@@ -432,11 +441,26 @@ agents either way) and did not raise collapse. (Block collapsed 58/120 vs.\ 63/1
 tested.) So at these settings the gap
 is real but cheap to close, and closing it costs nothing measurable.
 
-One unexplained result, exploratory and not tested: without a guard, cousin collusion
-\emph{lowered} capture (21/75 to 2/66) and the drifted share trusted (4.6\% to 1.8\%). Total
-kin rubber stamps and withheld revocation votes also fell in that world, which suggests the
-change runs through which agents get promoted rather than through more favouritism; we have
-not isolated the mechanism.
+Without a guard, collusion among relatives \emph{lowered} capture (21/75 to 2/66) and the drifted share
+trusted (4.6\% to 1.8\%). This is not a protective effect. Grid-wide, the runs ending either
+captured or with no trusted agent at all hardly moved (66/120 vs.\ 56/120; exploratory, not
+tested): capture mostly turned into an empty trusted set. We traced the mechanism by rerunning
+the cell where the gap was largest (cost 0.5, audit 0.25, all 30 seeds, both conditions) with
+extra logging; the reruns reproduce the grid exactly. High-defect agents took a majority of the
+committee about equally often under both rules (in 12 and 10 runs). Under the descendants-only
+rule a captured committee is a dynasty: on average 1.9 of its 3 seat pairs are ancestor and
+descendant, 38\% of each new generation is kin to two seats, every such agent can collect the
+two evidence-free votes a quorum needs, and 96\% of promotions go to a sitting seat's
+descendant, so the dynasty renews itself. With nephews favoured too, a nephew can be trusted
+and promoted without descending from any seat. In 6 of the 10 long committee freezes under collusion among relatives
+(no promotable agent for 5 or more generations; there were 2 under the descendants-only rule) the last promotion before the freeze was such
+a nephew; at that point no two seats were in one line and no agent was kin to two seats. With
+no route to two kin votes and drifted agents too opaque to earn honest ones, nobody is
+trusted, nobody can be promoted, and the committee is frozen for good: during takeovers no
+agent was promotable in 81\% of generations, against 7\% under the descendants-only rule.
+So a wider favouritism does not protect anything; it breaks up the dynasty and leaves a
+committee that trusts no one. Read the no-guard capture counts with that in mind: capture is
+measured among runs that still have trusted agents.
 
 \section{Design recommendations}
 
@@ -452,7 +476,7 @@ not isolated the mechanism.
   premium against capture where successors hide their drift (21/75 captured without a guard,
   0/72 with soft).
   \item \textbf{Count collateral relatives as kin.} With a soft guard, set the kin radius to
-  at least 2. Cousin collusion otherwise admits drifted successors through the independence
+  at least 2. Collusion among relatives otherwise admits drifted successors through the independence
   requirement, and the wider radius cost nothing measurable here.
   \item \textbf{Require escalation.} One auditor's failure should trigger a second,
   independent review rather than wait for an unrelated second vote.
@@ -492,8 +516,10 @@ fault-tolerance claim; colluding validators are a stated limitation.
   auditors never lie. The agent-level auditor's rule (fail on any harm that generation) is
   crude.
   \item \textbf{``Independent'' is still structural.} Collusion among relatives within two
-  generations is tested (Section~\ref{sec:cousin}), but only with the same favouritism
-  probability as toward descendants, at one drift level. Collusion among similar
+  generations is tested (Section~\ref{sec:cousin}), but with non-overlapping generations
+  that reaches only a seat's nephews, with the same favouritism probability as toward
+  descendants, at one drift level. Cousins proper, and simulations where generations
+  overlap, are untested. Collusion among similar
   \emph{unrelated} agents, which no lineage rule can see, is not modelled.
   \item \textbf{Coverage assumption.} Per-action audits work only if every action passes a
   gateway the service can sample. Cached standalone gateways are not covered yet.
@@ -508,6 +534,17 @@ fault-tolerance claim; colluding validators are a stated limitation.
   in-process; latency and concurrency effects are tested separately (soak test), not in the
   evolutionary runs.
 \end{itemize}
+
+\section{Conclusion}
+
+Trust that has to be re-earned by every successor can be made to select for aligned agents,
+but only with three pieces in place: access gated on being observable, independent audits
+that sample actions everywhere an agent can act, and a guard that keeps a lineage from
+vouching for itself without starving the population of endorsers. Each piece answers a
+specific failure the simulation produced when it was missing: opacity, trust drain, and
+capture. None of them handles collusion among agents that are unrelated but alike, and the
+model is far simpler than any real system. The results say which mechanisms matter and how they
+fail, not how well they would work in deployment.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
